@@ -5,6 +5,12 @@ tags: bostrom, infrastructure, servers, hardware
 crystal-type: entity
 crystal-domain: cyber
 stake: 48773364902086448
+diffusion: 0.00012724820649643171
+springs: 0.00011133071374843044
+heat: 0.00012542145328369272
+focus: 0.00012210760802948195
+gravity: 1
+density: 0.95
 ---
 
 - Back to [[bostrom infrastructure]]

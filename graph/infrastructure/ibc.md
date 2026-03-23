@@ -5,6 +5,12 @@ tags: bostrom, infrastructure, ibc, interchain
 crystal-type: entity
 crystal-domain: cyber
 stake: 40392445131733184
+diffusion: 0.00017431494042017455
+springs: 0.00017892548173622643
+heat: 0.00019747117715023202
+focus: 0.00018032935016099928
+gravity: 3
+density: 1.53
 ---
 # IBC (Inter-Blockchain Communication)
 

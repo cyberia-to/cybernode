@@ -5,6 +5,12 @@ tags: bostrom, infrastructure, cybernode
 crystal-type: entity
 crystal-domain: cyber
 stake: 36126926768927784
+diffusion: 0.00044755501548877447
+springs: 0.00014407616291212198
+heat: 0.0002548253488037473
+focus: 0.0003179654263787692
+gravity: 8
+density: 5.51
 ---
 - # Bostrom Infrastructure
 - The Bostrom network is supported by a decentralized infrastructure operated by the [[cyberia]] team and community validators. This documentation covers the public infrastructure available to developers and users.

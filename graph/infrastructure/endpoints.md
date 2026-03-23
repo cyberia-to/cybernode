@@ -5,6 +5,12 @@ tags: bostrom, infrastructure, api, endpoints
 crystal-type: entity
 crystal-domain: cyber
 stake: 35574057006881760
+diffusion: 0.0003125754584836327
+springs: 0.00011414888227704201
+heat: 0.00019131780372210128
+focus: 0.00022879595466934624
+gravity: 6
+density: 0.97
 ---
 - # Public Endpoints
 	- Back to [[bostrom infrastructure]]

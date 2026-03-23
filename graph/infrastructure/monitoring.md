@@ -5,6 +5,12 @@ tags: bostrom, infrastructure, monitoring, status
 crystal-type: process
 crystal-domain: cyber
 stake: 27762117110846052
+diffusion: 0.000203244681641686
+springs: 0.0000621855254103914
+heat: 0.00011312661391200016
+focus: 0.0001429033212263586
+gravity: 3
+density: 1.33
 ---
 # Monitoring & Status
 

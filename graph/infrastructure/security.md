@@ -5,6 +5,12 @@ tags: bostrom, infrastructure, security
 crystal-type: entity
 crystal-domain: cyber
 stake: 35270161707214084
+diffusion: 0.00013537623653753632
+springs: 0.00019960703813375942
+heat: 0.00019492554097317734
+focus: 0.0001665553379035293
+gravity: 2
+density: 0.61
 ---
 # Security
 

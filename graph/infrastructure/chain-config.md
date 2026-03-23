@@ -5,6 +5,12 @@ tags: bostrom, infrastructure, wallet, keplr, config
 crystal-type: entity
 crystal-domain: cyber
 stake: 41108246711070904
+diffusion: 0.00012724820649643171
+springs: 0.0001971437674032268
+heat: 0.00019846133659756724
+focus: 0.00016245950078869526
+gravity: 1
+density: 1.14
 ---
 - # Chain Configuration
 	- Back to [[bostrom infrastructure]]

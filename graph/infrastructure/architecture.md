@@ -5,6 +5,12 @@ tags: bostrom, infrastructure, architecture
 crystal-type: entity
 crystal-domain: cyber
 stake: 32557072345120688
+diffusion: 0.0003197434897329423
+springs: 0.0001392728128659842
+heat: 0.0002068361465921228
+focus: 0.00024302081804468786
+gravity: 5
+density: 2.14
 ---
 # Architecture
 
