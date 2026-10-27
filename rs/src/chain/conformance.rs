@@ -168,6 +168,16 @@ pub fn entries() -> Vec<Entry> {
     out
 }
 
+/// Where the blessed `chain.snap` lives. soft3 owns conformance snapshots:
+/// `$SOFT3_CONFORMANCE_DIR/chain.snap` when that variable is set and non-empty,
+/// otherwise the sibling soft3 checkout (cybernode and soft3 cloned side by side).
+pub fn chain_snap_path() -> std::path::PathBuf {
+    match std::env::var_os("SOFT3_CONFORMANCE_DIR") {
+        Some(dir) if !dir.is_empty() => std::path::Path::new(&dir).join("chain.snap"),
+        _ => std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../soft3/conformance/chain.snap")),
+    }
+}
+
 /// Parse a committed `chain.snap`.
 pub fn parse(src: &str) -> Vec<Entry> {
     let mut out = Vec::new();
@@ -309,8 +319,10 @@ mod tests {
     /// line, and the pussy genesis entries when the file is cached.
     #[test]
     fn committed_chain_snap_matches_this_build() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../conformance/chain.snap");
-        let committed = parse(&std::fs::read_to_string(path).expect("conformance/chain.snap"));
+        let path = chain_snap_path();
+        let committed = parse(&std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("{}: {e}; set SOFT3_CONFORMANCE_DIR to soft3's conformance/ directory", path.display())
+        }));
         let mut current = entries();
         let home = std::env::var("HOME").unwrap_or_default();
         let pussy = std::path::Path::new(&home).join(".cache/cyber/genesis/pussy.tade");
@@ -318,7 +330,7 @@ mod tests {
             current.extend(genesis_entries("pussy", &bytes).unwrap());
         }
         let d = drift(&committed, &current);
-        assert!(d.is_empty(), "chain.snap drift (re-bless with `soft3 conformance bless chain` and review): {d:?}");
+        assert!(d.is_empty(), "chain.snap drift (re-bless with `cybernode conformance bless chain` and review): {d:?}");
         assert!(committed.iter().any(|e| e.scenario == "pussy particle"));
     }
 }
