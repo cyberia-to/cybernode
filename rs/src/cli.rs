@@ -269,7 +269,7 @@ fn cmd_node(args: &[String]) {
         println!("             [--corpus DIR]   # record every block given, with its verdict and state root (blocks.jsonl)");
         println!("             (mining is `cybernode mine --node http://BIND --address NEURON`: /template + /submit)");
         println!("  cybernode node id --home DIR      # radio endpoint id (64 hex) for peers.toml");
-    println!("  cybernode genesis build --chain pussy|bostrom|pussy-rc --snapshot DIR --out FILE [--time UNIX]");
+    println!("  cybernode genesis build --chain pussy|bostrom|pussy-rc --snapshot DIR --out FILE");
     println!("                      [--cache DIR] [--export DIR] [--no-root] [--time UNIX]");
     println!("  cybernode genesis verify FILE [--root]");
     println!("  cybernode conformance bless|check chain [--genesis FILE]");
@@ -658,7 +658,7 @@ fn print_help() {
     println!("  cybernode node --chain <pussy|bostrom|dev> --home DIR --bind HOST:PORT --radio HOST:UDP --peers FILE --moniker NAME");
     println!("  cybernode node id --home DIR");
     println!("  cybernode chain genesis-dev|key|tx …   # dev helpers");
-    println!("  cybernode genesis build --chain pussy|bostrom|pussy-rc --snapshot DIR --out FILE [--time UNIX]");
+    println!("  cybernode genesis build --chain pussy|bostrom|pussy-rc --snapshot DIR --out FILE");
     println!("                      [--cache DIR] [--export DIR] [--no-root] [--time UNIX]");
     println!("  cybernode genesis verify FILE [--root]");
     println!("  soft3 manifesto");
