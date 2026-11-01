@@ -269,7 +269,7 @@ fn cmd_node(args: &[String]) {
         println!("             [--corpus DIR]   # record every block given, with its verdict and state root (blocks.jsonl)");
         println!("             (mining is `cybernode mine --node http://BIND --address NEURON`: /template + /submit)");
         println!("  cybernode node id --home DIR      # radio endpoint id (64 hex) for peers.toml");
-    println!("  cybernode genesis build --chain pussy|bostrom --snapshot DIR --out FILE");
+    println!("  cybernode genesis build --chain pussy|bostrom|pussy-rc --snapshot DIR --out FILE [--time UNIX]");
     println!("                      [--cache DIR] [--export DIR] [--no-root] [--time UNIX]");
     println!("  cybernode genesis verify FILE [--root]");
     println!("  cybernode conformance bless|check chain [--genesis FILE]");
@@ -529,6 +529,9 @@ fn cmd_chain(args: &[String]) {
         Some("genesis-dev") => {
             let name = flags.get("name").cloned().unwrap_or_else(|| "dev".into());
             if node::chain_node::LAUNCH_CHAINS.contains(&name.as_str()) {
+                if name == "pussy-rc" {
+                    die("`pussy-rc` is a launch chain; its genesis comes from `cybernode genesis build --chain pussy-rc --time T`".into());
+                }
                 die(format!("`{name}` is a launch chain; its genesis comes from `cybernode genesis build`"));
             }
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -655,7 +658,7 @@ fn print_help() {
     println!("  cybernode node --chain <pussy|bostrom|dev> --home DIR --bind HOST:PORT --radio HOST:UDP --peers FILE --moniker NAME");
     println!("  cybernode node id --home DIR");
     println!("  cybernode chain genesis-dev|key|tx …   # dev helpers");
-    println!("  cybernode genesis build --chain pussy|bostrom --snapshot DIR --out FILE");
+    println!("  cybernode genesis build --chain pussy|bostrom|pussy-rc --snapshot DIR --out FILE [--time UNIX]");
     println!("                      [--cache DIR] [--export DIR] [--no-root] [--time UNIX]");
     println!("  cybernode genesis verify FILE [--root]");
     println!("  soft3 manifesto");
@@ -994,7 +997,7 @@ fn cmd_genesis(args: &[String]) {
     match sub {
         "build" => {
             let Some(chain) = value("--chain").and_then(|c| Chain::parse(&c)) else {
-                eprintln!("genesis build: --chain pussy|bostrom is required");
+                eprintln!("genesis build: --chain pussy|bostrom|pussy-rc is required");
                 std::process::exit(2);
             };
             let Some(snapshot) = value("--snapshot") else {
@@ -1082,7 +1085,7 @@ fn cmd_genesis(args: &[String]) {
             }
         }
         _ => {
-            eprintln!("usage: cybernode genesis build --chain pussy|bostrom --snapshot DIR --out FILE [--cache DIR] [--export DIR] [--no-root] [--time UNIX]");
+            eprintln!("usage: cybernode genesis build --chain pussy|bostrom|pussy-rc --snapshot DIR --out FILE [--cache DIR] [--export DIR] [--no-root] [--time UNIX]");
             eprintln!("       cybernode genesis verify FILE [--root]");
             std::process::exit(2);
         }
