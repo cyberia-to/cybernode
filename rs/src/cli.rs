@@ -948,7 +948,7 @@ fn cmd_conformance(args: &[String]) {
     match sub {
         "check" => {
             if !pins_ok {
-                eprintln!("chain.snap: the pins in crate/src/chain/params.rs do not match the genesis file");
+                eprintln!("chain.snap: the pins in rs/src/chain/params.rs do not match the genesis file");
                 std::process::exit(1);
             }
             if drift.is_empty() {
