@@ -329,18 +329,20 @@ mod tests {
 
     #[test]
     fn pussy_pins_match_the_blessed_files_and_bostrom_is_unpinned() {
-        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../conformance");
+        // soft3 owns the blessed files; resolve its directory the way chain_snap_path does.
+        let snap_path = crate::chain::conformance::chain_snap_path();
+        let root = snap_path.parent().unwrap();
         let pussy = embedded("pussy").unwrap();
         assert!(pussy.pinned());
         assert!(!embedded("bostrom").unwrap().pinned());
 
-        let toml_text = std::fs::read_to_string(format!("{root}/chain-genesis.toml")).unwrap();
+        let toml_text = std::fs::read_to_string(root.join("chain-genesis.toml")).unwrap();
         let table: toml::Table = toml_text.parse().unwrap();
         let sect = table["pussy"].as_table().unwrap();
         assert_eq!(pussy.chain_id, unhex(sect["particle"].as_str().unwrap()));
         assert_eq!(pussy.genesis_block, unhex(sect["block0_id"].as_str().unwrap()));
 
-        let snap = std::fs::read_to_string(format!("{root}/chain.snap")).unwrap();
+        let snap = std::fs::read_to_string(&snap_path).unwrap();
         let entries = crate::chain::conformance::parse(&snap);
         let find = |scenario: &str| entries.iter().find(|e| e.key == "chain::genesis@v1" && e.scenario == scenario).unwrap().value;
         assert_eq!(pussy.chain_id, find("pussy particle"));
