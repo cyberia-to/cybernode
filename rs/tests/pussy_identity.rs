@@ -2,10 +2,10 @@
 //! blessed genesis file (particle and block 0 pinned in `chain::params`,
 //! values from `conformance/chain-genesis.toml`).
 
-use crate::chain::net::codec::hex;
-use crate::chain::params::embedded;
-use crate::genesis::file::{Balance, GenesisFile, Params};
-use crate::node::chain_node::{ChainNode, ChainOpts};
+use cybernode::chain::net::codec::hex;
+use cybernode::chain::params::embedded;
+use cybernode::genesis::file::{Balance, GenesisFile, Params};
+use cybernode::node::chain_node::{ChainNode, ChainOpts};
 use std::path::{Path, PathBuf};
 
 fn opts(home: &Path, genesis: Option<PathBuf>) -> ChainOpts {
@@ -54,18 +54,18 @@ fn garbage_genesis_is_refused_by_the_particle_check() {
 #[test]
 fn well_formed_genesis_naming_pussy_is_refused_by_the_particle_check() {
     let name = "pussy".to_string();
-    let balances = vec![Balance { owner: [7; 32], token: crate::chain::sigs::token(&name), amount: 1_000_000 }];
+    let balances = vec![Balance { owner: [7; 32], token: cybernode::chain::sigs::token(&name), amount: 1_000_000 }];
     let file = GenesisFile {
         params: Params {
             version: 1, name: name.clone(), hrp: name.clone(), denom: name, time: 1_793_885_820,
-            bits: crate::chain::params::POW_LIMIT_BITS, subsidy: crate::chain::params::subsidy(1_000_000),
-            checkpoint_key: [0; 33], checkpoint_sunset: crate::chain::params::CHECKPOINT_SUNSET,
-            pool: crate::chain::pool::Pool::genesis(),
+            bits: cybernode::chain::params::POW_LIMIT_BITS, subsidy: cybernode::chain::params::subsidy(1_000_000),
+            checkpoint_key: [0; 33], checkpoint_sunset: cybernode::chain::params::CHECKPOINT_SUNSET,
+            pool: cybernode::chain::pool::Pool::genesis(),
         },
         balances,
         links: vec![],
     };
-    let genesis = crate::chain::genesis::Genesis::from_file(&file).unwrap();
+    let genesis = cybernode::chain::genesis::Genesis::from_file(&file).unwrap();
     assert_ne!(genesis.chain_id, embedded("pussy").unwrap().chain_id);
     refused("forged", &genesis.bytes);
 }
