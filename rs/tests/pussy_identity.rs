@@ -2,7 +2,6 @@
 //! blessed genesis file (particle and block 0 pinned in `chain::params`,
 //! values from `conformance/chain-genesis.toml`).
 
-use crate::chain::net::chain_view::ChainView;
 use crate::chain::net::codec::hex;
 use crate::chain::params::embedded;
 use crate::genesis::file::{Balance, GenesisFile, Params};
