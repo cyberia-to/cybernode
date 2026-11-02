@@ -20,6 +20,7 @@ fn opts(home: &Path, genesis: Option<PathBuf>) -> ChainOpts {
         relay: false,
         log_net: false,
         corpus: None,
+        reverts: Vec::new(),
     }
 }
 
