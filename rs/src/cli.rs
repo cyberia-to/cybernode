@@ -1107,6 +1107,7 @@ fn cmd_genesis(args: &[String]) {
                     println!("  time       {}", r.time);
                     println!("  S0         {}  subsidy {}", r.s0, r.subsidy);
                     println!("  pool       format {} depth {} anchor_window {} digest {} tags {}", r.pool.format, r.pool.depth, r.pool.anchor_window, r.pool.digest, r.pool.tags);
+                    println!("  checkpoint_key  {}", r.checkpoint_key);
                     print_root(&r.state_root, &r.block0_id, &r.root_blocked);
                     for (k, v) in &r.counts {
                         println!("  {k:<34} {v}");
@@ -1149,6 +1150,7 @@ fn cmd_genesis(args: &[String]) {
                         v.pool.format, v.pool.depth, v.pool.anchor_window, v.pool.digest, v.pool.tags
                     );
                     println!("  pool empty_root {}", v.pool.empty_root);
+                    println!("  checkpoint_key  {}", v.checkpoint_key);
                     if has("--root") {
                         print_root(&v.state_root, &v.block0_id, &v.root_blocked);
                     }
