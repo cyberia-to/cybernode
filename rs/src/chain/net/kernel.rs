@@ -27,12 +27,13 @@ use crate::chain::corpus::CorpusWriter;
 use crate::chain::engine::{Chain, OpenOptions};
 use crate::chain::header::{self as kheader, Header as KHeader, HeaderError as KHeaderError};
 use crate::chain::params::ORPHAN_POOL_HEADERS;
+use crate::chain::revert_statement::{RevertStatement, StatementError};
 use crate::chain::select::Checkpoint;
 use crate::chain::state::StateBackend;
 use crate::chain::tx as ktx;
 use crate::chain::u256::U256 as KU256;
 
-use super::chain_view::{Admitted, BlockError, BlockVerdict, ChainEvent, ChainView, HeaderError, HeaderVerdict, Tip, TxRefusal};
+use super::chain_view::{Admitted, BlockError, BlockVerdict, ChainEvent, ChainView, HeaderError, HeaderVerdict, StatementRefusal, Tip, TxRefusal};
 use super::codec::{Header, Id, U256};
 
 fn to_kernel(h: &Header) -> KHeader {
@@ -148,6 +149,13 @@ impl Inner {
     /// After a write: if the tip moved, the bodies that left the main chain
     /// (oldest first), with the txid index kept in step.
     fn moved(&mut self, before: &crate::chain::api::Tip) -> Option<ChainEvent> {
+        self.moved_with(before, true)
+    }
+
+    /// As [`Inner::moved`]; `readmit = false` reports no bodies as reorged
+    /// out: a revert statement (§5.6) drops the transactions of the blocks it
+    /// retracts, the mempool only purges what no longer applies.
+    fn moved_with(&mut self, before: &crate::chain::api::Tip, readmit: bool) -> Option<ChainEvent> {
         let after = self.chain.tip();
         // finalized blocks are the shadow indexers' (chain.md §7.3); the wire has no use for
         // them — but a `Reverted` (§5.6) stays queued for the indexers
@@ -172,6 +180,7 @@ impl Inner {
         for h in fork + 1..=after.height {
             self.index(h);
         }
+        let reorged_out = if readmit { reorged_out } else { Vec::new() };
         Some(ChainEvent::NewTip { height: after.height, id: after.id, reorged_out })
     }
 }
@@ -491,6 +500,24 @@ impl ChainView for KernelChain {
         drop(inner);
         self.emit(event);
         result
+    }
+
+    fn accept_revert_statement(&self, bytes: &[u8]) -> Result<bool, StatementRefusal> {
+        let refuse = |e: StatementError| StatementRefusal { score: e.score(), reason: e.to_string() };
+        let st = RevertStatement::decode(bytes).ok_or_else(|| refuse(StatementError::Malformed))?;
+        let mut inner = self.lock();
+        let before = inner.chain.tip();
+        let result = inner.chain.accept_revert_statement(&st).map_err(refuse);
+        // statuses changed and the tip may have gone back below MAX_REORG
+        inner.best = None;
+        let event = inner.moved_with(&before, false);
+        drop(inner);
+        self.emit(event);
+        result
+    }
+
+    fn revert_statements(&self) -> Vec<Vec<u8>> {
+        self.lock().chain.revert_statements().iter().map(RevertStatement::encode).collect()
     }
 
     fn missing_bodies(&self, max: usize) -> Vec<(u64, Id)> {

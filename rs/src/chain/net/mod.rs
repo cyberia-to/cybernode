@@ -261,6 +261,17 @@ impl Net {
         true
     }
 
+    /// Hold a revert statement of the owner key here (chain.md §5.6: verified,
+    /// persisted, applied by the kernel) and announce it on the `checkpoints`
+    /// topic. `Ok(true)` when it is new; `Ok(false)` when it changes nothing
+    /// (it is announced again all the same, so a submission re-seeds the
+    /// gossip). `Err` carries the refusal.
+    pub async fn publish_revert(&self, bytes: &[u8]) -> Result<bool, String> {
+        let new = self.inner.chain.accept_revert_statement(bytes).map_err(|e| e.to_string())?;
+        let _ = self.inner.checkpoints_tx.broadcast_neighbors(bytes::Bytes::from(Frame::Revert(bytes.to_vec()).encode())).await;
+        Ok(new)
+    }
+
     /// Announce a transaction admitted here.
     pub async fn publish_tx(&self, bytes: &[u8]) {
         self.inner.note_relayed(codec::txid(&self.inner.chain.chain_id(), bytes));

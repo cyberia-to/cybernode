@@ -260,3 +260,60 @@ fn a_block_that_contradicts_a_held_checkpoint_is_refused_even_on_the_tip() {
     }
     assert_eq!(b.chain.tip().id, honest.last().unwrap().0.id());
 }
+
+/// chain.md §5.6 on the wire: an owner's revert statement delivered to two
+/// nodes rewinds both; a header of the new rule set that arrives before the
+/// statement is unexplained but never scored; the retracted transactions are
+/// dropped, not re-admitted; both end on one tip above H.
+#[test]
+fn a_revert_statement_rewinds_two_nodes_and_they_end_on_one_tip_above_h() {
+    use crate::chain::revert_statement::RevertStatement;
+    let net = Net::new(3);
+    let (a, b) = (scratch(&net, "rs-a"), scratch(&net, "rs-b"));
+    let tx = net.transfer(0, 0, net.neurons[2], 10, 224);
+    let old: Vec<_> = (1..=8).map(|h| mine(&a.chain, &net.neurons[1], if h == 7 { std::slice::from_ref(&tx) } else { &[] })).collect();
+    for (h, body) in &old {
+        assert_eq!(b.chain.accept_block(h, body, NOW), Ok(BlockVerdict::NewTip));
+    }
+    let txid = codec::txid(&b.chain.chain_id(), &tx);
+    assert_eq!(b.chain.tx_location(&txid).map(|l| l.0), Some(7));
+    let mut events = b.chain.events();
+
+    let sign = |key: &mudra::SigningKey| RevertStatement::sign(&net.genesis.chain_id, 5, old[4].0.id(), 1, old[4].0.time + 300, key).unwrap().encode();
+    let bytes = sign(&net.checkpoint_key);
+    // another key's statement, and bytes that are no statement, are offences; a duplicate is not
+    let forged = sign(&crate::chain::tests::key(5));
+    assert_eq!(a.chain.accept_revert_statement(&forged).unwrap_err().score, 10);
+    assert_eq!(a.chain.accept_revert_statement(&bytes[..10]).unwrap_err().score, 10);
+    assert!(a.chain.revert_statements().is_empty());
+
+    // a receives the statement and mines the new branch (rule set 2, at or after the anchor)
+    assert_eq!(a.chain.accept_revert_statement(&bytes), Ok(true));
+    assert_eq!(a.chain.accept_revert_statement(&bytes), Ok(false));
+    assert_eq!(a.chain.tip().height, 5);
+    assert_eq!(a.chain.revert_statements(), vec![bytes.clone()]);
+    let new: Vec<_> = (0..4).map(|_| mine(&a.chain, &net.neurons[2], &[])).collect();
+    assert_eq!(new[0].0.version & 0xffff, 2);
+
+    // b sees the new branch first: a rule set it does not know, which costs the sender nothing
+    let e = b.chain.accept_header(&new[0].0, NOW).unwrap_err();
+    assert!(matches!(e, HeaderError::UnknownRuleSet) && e.score() == 0, "{e:?}");
+    assert_eq!(b.chain.revert_status().upgrade_required, Some((6, 2)));
+    // then the statement: b goes back to 5 at once (deeper or not), and the flag is explained
+    assert_eq!(b.chain.accept_revert_statement(&bytes), Ok(true));
+    assert_eq!(b.chain.tip().height, 5);
+    assert_eq!(b.chain.revert_status().upgrade_required, None);
+    assert_eq!(b.chain.tx_location(&txid), None, "the retracted transaction left the index");
+    let mut tips = Vec::new();
+    while let Ok(ChainEvent::NewTip { height, reorged_out, .. }) = events.try_recv() {
+        tips.push((height, reorged_out.len()));
+    }
+    assert_eq!(tips, vec![(5, 0)], "the retracted bodies are not offered back to the mempool");
+    for (h, body) in &new {
+        assert_eq!(b.chain.accept_block(h, body, NOW), Ok(BlockVerdict::NewTip));
+    }
+    assert_eq!(a.chain.tip(), b.chain.tip());
+    assert_eq!(a.chain.tip().height, 9);
+    assert_eq!(a.chain.state_root(), b.chain.state_root());
+    assert!(a.chain.conserved() && b.chain.conserved());
+}
