@@ -14,8 +14,10 @@ decided and executed from [[soft3/proposals/cybernode|the cybernode proposal]] (
 |---|---|
 | `rs/` | the crate and binary `cybernode`: `chain/` the kernel, `genesis/`, `node/`, `wallet/`, `network.rs`; the verbs `run` (`node`) · `mine` · `sync` (`status`) · `genesis` · `chain` · `conformance` · `network` |
 | `specs/` | [[cybernode/specs/chain|chain]] · [[cybernode/specs/chain-wire|chain-wire]] · [[cybernode/specs/chain-conformance|chain-conformance]] · [[cybernode/specs/chain-economy|chain-economy]] · [[cybernode/specs/genesis|genesis]] · [[cybernode/specs/native-node|native-node]] · [[cybernode/specs/routing|routing]] |
-| `deploy/` | `cybernode@<network>.service`, `cybernode-check`, journald, logrotate, nginx and ufw templates of an instance |
-| `audit/` | the receipts: conformance, economy, mining, the net, the requirement map of the chain |
+| `deploy/` | `cybernode@<network>.service`, `cybernode-check`, journald, logrotate, nginx and ufw templates of an instance; `deploy/chain/README.md` is the runbook of the two apparatus hosts |
+| `scripts/` | `chain-fleet.nu`, three nodes on one machine — the local rehearsal of the runbook |
+| `docs/` | [[cybernode/docs/launch|launch]], the node operator guide: install, run, probe, the public host |
+| `audit/` | the receipts: conformance, economy, mining, the net, the requirement map of the chain, block relation and proof authentication |
 
 ```
 cargo install --path rs            # or: cargo install cybernode, once published
@@ -23,6 +25,12 @@ cybernode run --chain pussy --home ~/.soft3/pussy --bind 127.0.0.1:8545 --radio 
 cybernode mine --address NEURON --node http://127.0.0.1:8545
 cybernode conformance check chain
 ```
+
+operators start at [[cybernode/docs/launch|docs/launch.md]]; the root chain on the apparatus hosts follows `deploy/chain/README.md`.
+
+## kept names
+
+decided 2026-11-02 while closing the proposal (§ 5): the wire identifiers (`soft3/chain/…/v1`, `soft3/spacepussy-test/v1`), the genesis files, the home directories (`~/.soft3/<chain>`, `/etc/soft3`, `/var/lib/soft3`) and the environment variable names `SOFT3_CHAIN`, `SOFT3_BIND`, `SOFT3_RADIO`, `SOFT3_MONIKER`, `SOFT3_STALE_SECS`, `SOFT3_MIN_DISK_GIB`, `SOFT3_DEV_EPOCH`, `SOFT3_COST_*`, `SOFT3_CONFORMANCE_DIR` keep their names, for compatibility with the running hosts and every genesis hash. everything a person reads — strings, docs, unit names, scripts, specs — says cybernode. a change to a kept name is a consensus or an operations change and goes through specs/chain.md § 7 or the apparatus runbooks.
 
 the `soft3` crate remains the stack facade: it depends on cybernode, re-exports its modules for one release and forwards the operational verbs, so nothing that built against `soft3::chain` breaks today. the soft3 repository keeps the ladder, the contracts of the stack, the release train and the SDKs; the private repository `apparatus` keeps cyberia's own hosts, secrets and runbooks.
 
