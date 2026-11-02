@@ -45,6 +45,35 @@ pub struct Chain {
     pub bootloader: &'static str,
     /// Genesis time of chain.md §4.3.
     pub genesis_time: u64,
+    /// The genesis `checkpoint_key` of chain.md §4.4: signs checkpoints until
+    /// `checkpoint_sunset` and revert statements of §5.6 with no sunset; zero
+    /// disables both.
+    pub checkpoint_key: [u8; 33],
+}
+
+/// The owner's key (compressed secp256k1 public key), generated 2026-11-02 on
+/// the owner's machine; the secret is held by the owner. Neuron id
+/// 3c51813c79349f501a1b6fe0dc84af204980d3c8a70622b812655bbcab171292.
+pub const OWNER_KEY: [u8; 33] = h33("0354814b25ec4214b782b48b0d4cd562331f43ce77513f5ca0dd4414096959f473");
+
+/// Decode 66 hex digits at compile time; a typo fails the build.
+const fn h33(s: &str) -> [u8; 33] {
+    const fn nibble(c: u8) -> u8 {
+        match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            _ => panic!("key is not lowercase hex"),
+        }
+    }
+    let b = s.as_bytes();
+    assert!(b.len() == 66, "key is not 66 hex digits");
+    let mut out = [0u8; 33];
+    let mut i = 0;
+    while i < 33 {
+        out[i] = (nibble(b[2 * i]) << 4) | nibble(b[2 * i + 1]);
+        i += 1;
+    }
+    out
 }
 
 pub const PUSSY: Chain = Chain {
@@ -53,6 +82,7 @@ pub const PUSSY: Chain = Chain {
     native: "pussy",
     bootloader: "space-pussy",
     genesis_time: 1_793_885_820, // 2026-11-05T13:37:00Z
+    checkpoint_key: OWNER_KEY,
 };
 
 pub const BOSTROM: Chain = Chain {
@@ -61,6 +91,7 @@ pub const BOSTROM: Chain = Chain {
     native: "boot",
     bootloader: "bostrom",
     genesis_time: 1_793_884_962, // 2026-11-05T13:22:42Z
+    checkpoint_key: [0; 33], // bostrom has no date and no authority yet
 };
 
 /// Rehearsal chain: pussy's burial state (same snapshot, same derivation, same
@@ -74,6 +105,7 @@ pub const PUSSY_RC: Chain = Chain {
     native: "pussy",
     bootloader: "space-pussy",
     genesis_time: 0,
+    checkpoint_key: OWNER_KEY,
 };
 
 impl Chain {
@@ -154,6 +186,8 @@ pub struct Report {
     pub time: u64,
     pub s0: String,
     pub subsidy: u64,
+    /// Hex of the `checkpoint_key` decoded back out of the written file.
+    pub checkpoint_key: String,
     /// The frozen pool formats the chain id commits to (chain.md §11.10).
     pub pool: PoolReport,
     pub state_root: Option<String>,
@@ -216,6 +250,7 @@ pub fn build(chain: Chain, snapshot: &Path, out: &Path, options: &Options) -> io
     }
     write_atomic(out, &bytes)?;
 
+    let written = GenesisFile::decode(&bytes)?;
     let mut report = Report {
         format: file::DIALECT,
         chain: chain.name.into(),
@@ -226,6 +261,7 @@ pub fn build(chain: Chain, snapshot: &Path, out: &Path, options: &Options) -> io
         time,
         s0: derived.file.native_supply().to_string(),
         subsidy: derived.file.params.subsidy,
+        checkpoint_key: hex(&written.params.checkpoint_key),
         pool: PoolReport::of(&derived.file.params.pool),
         state_root: None,
         block0_id: None,
@@ -313,6 +349,7 @@ pub fn verify(path: &Path, root: bool) -> io::Result<Verified> {
         particle: hex(&particle),
         s0: file.native_supply().to_string(),
         subsidy: file.params.subsidy,
+        checkpoint_key: hex(&file.params.checkpoint_key),
         b_frames: file.balances.len() as u64,
         l_frames: file.links.len() as u64,
         pool: PoolReport::of(&file.params.pool),
@@ -343,6 +380,7 @@ pub struct Verified {
     pub particle: String,
     pub s0: String,
     pub subsidy: u64,
+    pub checkpoint_key: String,
     pub b_frames: u64,
     pub l_frames: u64,
     pub pool: PoolReport,

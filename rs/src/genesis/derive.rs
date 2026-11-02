@@ -326,7 +326,7 @@ pub fn derive(chain: &Chain, snap: &Snapshot, time: u64) -> io::Result<Derived> 
         time,
         bits: file::GENESIS_BITS,
         subsidy: file::subsidy_of(s0)?,
-        checkpoint_key: [0u8; 33],
+        checkpoint_key: chain.checkpoint_key,
         checkpoint_sunset: file::CHECKPOINT_SUNSET,
         pool: super::pool::Pool::genesis(),
     };
