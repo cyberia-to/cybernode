@@ -17,7 +17,7 @@ pub enum Network {
 }
 
 impl Network {
-    /// Product default after `cargo install cybernode` / `true-cyber`.
+    /// Product default after installing `cybernode` / `true-cyber`.
     pub const DEFAULT: Network = Network::SpacePussyTest;
 
     pub fn parse(s: &str) -> Option<Self> {

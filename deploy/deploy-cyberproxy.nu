@@ -4,9 +4,10 @@
 
 const HOST = "cyberproxy"
 
-def main [] {
-    print $"deploying cybernode → ($HOST)"
-    ^ssh $HOST 'export PATH=$HOME/.cargo/bin:$PATH; cargo install --git https://github.com/cyberia-to/cybernode --rev $REV cybernode --force'
+# rev: the revision to install (the phase-1 pin of cybernode); the crates.io name is not published, so never an unpinned install
+def main [rev: string] {
+    print $"deploying cybernode ($rev) → ($HOST)"
+    ^ssh $HOST $"export PATH=$HOME/.cargo/bin:$PATH; cargo install --git https://github.com/cyberia-to/cybernode --rev ($rev) cybernode --force --locked"
     ^scp "deploy/spacepussy-test.service" $"($HOST):/tmp/spacepussy-test.service"
     ^ssh $HOST 'sudo cp /tmp/spacepussy-test.service /etc/systemd/system/spacepussy-test.service'
     ^ssh $HOST 'sudo systemctl daemon-reload && sudo systemctl enable --now spacepussy-test && sudo systemctl restart spacepussy-test'
