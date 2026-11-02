@@ -1,6 +1,6 @@
 # deploy/chain — the phase-1 root chain on two hosts
 
-Runbook for running `soft3 node` as the proof-of-work root chain (decision
+Runbook for running `cybernode node` as the proof-of-work root chain (decision
 2026-10-15, cyber/launch.md; genesis 2026-11-05) on two hosts, cyberproxy and
 agent-a (owner decision 2026-10-31: no new hardware; deimos and jupiter are
 retired, see § E). Node-to-node over cyber-radio (QUIC/UDP), the HTTP API
@@ -54,6 +54,14 @@ Machine facts behind cyberproxy: `apparatus/servers/cyberproxy/inventory-2026-10
 | miner | none | `cybernode mine --backend cpu` when `SOFT3_MINE_ADDRESS` is set |
 
 7780 stays with the 0.10.0 chaosnet node (`spacepussy-test.service`); it is untouched.
+Its files are the legacy stand in `deploy/` (`spacepussy-test.service`,
+`deploy-cyberproxy.nu`, `nginx-rpc.spacepussy-test.soft3.org.conf`): the
+spacepussy-test chaosnet on cyberproxy, now run by the `cybernode` binary
+(the `soft3` facade still forwards the verb). Nothing of the root chain lives there.
+
+Kept names (README § kept names): `/etc/soft3`, `/var/lib/soft3`, `~/.soft3`,
+the `SOFT3_*` variables and the tmux session `soft3-<chain>` stay as they are
+on the running hosts; only what an operator reads and types says cybernode.
 
 ## step by step
 
@@ -61,9 +69,9 @@ Machine facts behind cyberproxy: `apparatus/servers/cyberproxy/inventory-2026-10
 
 cyberproxy as below. agent-a: see the variant after step 8.
 
-1. Binary: `cargo install soft3 --version <phase-1 release> --locked` as `cyber`
-   (or copy the release binary to `/home/cyber/.cargo/bin/soft3`). Confirm
-   `soft3 node --help` lists `--chain --radio --peers`; the unit will not work
+1. Binary: `cargo install cybernode --version <phase-1 release> --locked` as `cyber`
+   (or copy the release binary to `/home/cyber/.cargo/bin/cybernode`). Confirm
+   `cybernode node --help` lists `--chain --radio --peers`; the unit will not work
    with the 0.10.0 flag set.
 2. Directories: `sudo mkdir -p /etc/soft3 /var/log/cybernode && sudo chown cyber:adm /var/log/cybernode`.
 3. Parameters: `sudo cp chain.env.example /etc/soft3/pussy.env`, edit bind/radio/moniker/MemoryMax
@@ -78,7 +86,7 @@ cyberproxy as below. agent-a: see the variant after step 8.
    snippet (`sed` line in the template), include it in the 443 server block,
    `sudo nginx -t`. Do **not** reload yet: the upstream is down and the
    location would answer 502 — reload on genesis day.
-7. Identity and peers: `soft3 node id --home /var/lib/soft3/pussy` prints the
+7. Identity and peers: `cybernode node id --home /var/lib/soft3/pussy` prints the
    endpoint id (64 hex). Cyberproxy's file is `peers.toml.example` →
    `/etc/soft3/pussy.peers.toml` (cyberproxy listed, it skips itself; agent-a
    is never listed — no inbound address, an id without addrs is a parse
@@ -113,7 +121,7 @@ cyberproxy as below. agent-a: see the variant after step 8.
    60 s and agree on height; on the dev chain the script goes on to assert a
    late joiner's IBD, a transaction crossing the fleet, a depth-3 fork reorg
    and a kill-and-restart recovery, all on the consensus kernel with
-   `soft3 mine --backend cpu` processes doing the work (receipts:
+   `cybernode mine --backend cpu` processes doing the work (receipts:
    `audit/chain/net-2026-10-15.md`, `audit/chain/slice-2026-10-16.md`).
 2. Dress rehearsal on the real two hosts with `SOFT3_CHAIN=pussy-rc` (the
    launch allow-list has it), ports 7783/7793:
@@ -190,14 +198,14 @@ is a parameter or a line in one file above.
 
 | assumption | where it lands |
 |--|--|
-| CLI: `soft3 node --chain <id> --home DIR --bind HOST:PORT --radio HOST:UDP --peers FILE --moniker NAME`; `soft3 node id --home DIR` prints the radio endpoint id — **implemented on the kernel** (soft3#187, slice 2026-10-16): `--home` is the chain directory (`radio.key`, `genesis.tade`, `blocks/` = the kernel's store, `anchors`); `--genesis FILE` installs the genesis file into it (required for `pussy`/`bostrom` until the file is embedded). The node does not mine: miners run `soft3 mine --node http://BIND --address NEURON` against `/template` + `/submit` | unit `ExecStart`, harness probe, step A7 |
-| chain ids in the launch set are `pussy`, `bostrom` (and `pussy-rc` for rehearsal) — from `crate/src/node/genesis.rs` on branch `launch/45-genesis-chain-allowlist`; protocol `soft3/<chain>/v1`, engine `cybergraph+bbg` | env `SOFT3_CHAIN`, harness placeholder genesis |
+| CLI: `cybernode node --chain <id> --home DIR --bind HOST:PORT --radio HOST:UDP --peers FILE --moniker NAME`; `cybernode node id --home DIR` prints the radio endpoint id — **implemented on the kernel** (soft3#187, slice 2026-10-16): `--home` is the chain directory (`radio.key`, `genesis.tade`, `blocks/` = the kernel's store, `anchors`); `--genesis FILE` installs the genesis file into it (required for `pussy`/`bostrom` until the file is embedded). The node does not mine: miners run `cybernode mine --node http://BIND --address NEURON` against `/template` + `/submit` | unit `ExecStart`, harness probe, step A7 |
+| chain ids in the launch set are `pussy`, `bostrom` (and `pussy-rc` for rehearsal) — from `rs/src/node/genesis.rs` on branch `launch/45-genesis-chain-allowlist`; protocol `soft3/<chain>/v1`, engine `cybergraph+bbg` | env `SOFT3_CHAIN`, harness placeholder genesis |
 | the radio endpoint id is the node's ed25519 public key, printed as 64 lowercase hex (radio `iroh-base` `PublicKey: Display`) | peers format `id` |
 | radio listens on one UDP port given by `--radio`; direct dial (agent-a → cyberproxy), no relay | ufw rule, peers `relay = ""` |
 | HTTP API keeps `GET /health` and `GET /status` with `height` and the bbg root (cyb bodies poll `/status` every 15 s with a 10 s timeout, `cyb/shell/src/worlds/body/networks.rs`), bodies limited to 8 MiB (`specs/native-node.md`) | nginx snippet, check script |
 | block cadence: ASERT targets 30 s (chain.md §1.5, half-life 600 s); `SOFT3_STALE_SECS=600` = 20 missed blocks, keep unless launch hashrate says otherwise | env, check `progress` |
 | PoW timestamp rule tolerates clock error of seconds; timesyncd (SNTP, ms-level) is enough, chrony is optional | unit `time-sync.target`, check `clock` |
 | state is `$home/blocks/` (headers, bodies, undo journals) + `$home/genesis.tade` (a tade file, chain.md §4.1 — not `genesis.json`); a restart replays every main-chain body on the genesis state and verifies the roots (§3.6) — measured locally in seconds for tens of blocks; budget it for the real height before genesis day | state dir, `TimeoutStopSec`, step C T−15 |
-| the genesis file is produced by `soft3 genesis build` (specs/genesis.md) and copied byte-identical; `scripts/chain-fleet.nu` generates a test genesis (`soft3 chain genesis-dev`: chain `dev`, floor target `POW_LIMIT_BITS`, genesis time two hours back) when none is given — never a launch chain | step C T−15 |
+| the genesis file is produced by `cybernode genesis build` (specs/genesis.md) and copied byte-identical; `scripts/chain-fleet.nu` generates a test genesis (`cybernode chain genesis-dev`: chain `dev`, floor target `POW_LIMIT_BITS`, genesis time two hours back) when none is given — never a launch chain | step C T−15 |
 | agent-a sits behind NAT; it dials cyberproxy, inbound to it is not assumed; a two-node stand has one dialable node, so cyberproxy restarting leaves agent-a reconnecting every `DIAL_INTERVAL` (3 s, `discovery.rs`) | peers files (agent-a is never listed), step C order, § layout |
 | `parse_peers`: an entry with an empty `id` is skipped, one with an id but no parsable `addrs` is a hard error; a node skips itself; `relay` is ignored by the code | `peers.toml.example`, `agent-a.peers.toml.example` |

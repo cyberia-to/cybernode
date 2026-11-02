@@ -6,7 +6,7 @@
 #   [[peer]]
 #   name  = "cyberproxy"             operator label, informational
 #   id    = "<endpoint id>"          radio endpoint id: the node's ed25519 public key, 64 lowercase hex chars,
-#                                    printed by `soft3 node id --home <home>` on that machine; empty string
+#                                    printed by `cybernode node id --home <home>` on that machine; empty string
 #                                    is allowed ONLY in the local harness (trust on first dial)
 #   addrs = ["ip:port", ...]         direct UDP addresses; v4 and v6 may both be listed
 #   relay = ""                       optional relay URL; the stand dials direct, leave empty

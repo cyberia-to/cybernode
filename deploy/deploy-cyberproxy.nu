@@ -1,11 +1,12 @@
 #!/usr/bin/env nu
-# Deploy real soft3 node (cybergraph+bbg) to cyberproxy.
+# Deploy the cybernode binary (spacepussy-test chaosnet, cybergraph+bbg) to cyberproxy.
+# Legacy stand of the 0.10.0 chaosnet on 7780; the root chain is deploy/chain/.
 
 const HOST = "cyberproxy"
 
 def main [] {
-    print $"deploying soft3 node → ($HOST)"
-    ^ssh $HOST 'export PATH=$HOME/.cargo/bin:$PATH; cargo install soft3 --force'
+    print $"deploying cybernode → ($HOST)"
+    ^ssh $HOST 'export PATH=$HOME/.cargo/bin:$PATH; cargo install cybernode --force'
     ^scp "deploy/spacepussy-test.service" $"($HOST):/tmp/spacepussy-test.service"
     ^ssh $HOST 'sudo cp /tmp/spacepussy-test.service /etc/systemd/system/spacepussy-test.service'
     ^ssh $HOST 'sudo systemctl daemon-reload && sudo systemctl enable --now spacepussy-test && sudo systemctl restart spacepussy-test'

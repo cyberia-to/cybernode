@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cybernode-check — health of one soft3 root-chain instance on this machine.
+# cybernode-check — health of one cybernode root-chain instance on this machine.
 #
 #   cybernode-check pussy            # full check, one line per probe, exit 0 ok / 1 degraded / 2 down
 #   cybernode-check --pre pussy      # ExecStartPre gate: clock synchronized, disk, env sanity (no HTTP)
