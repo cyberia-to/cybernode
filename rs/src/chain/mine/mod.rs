@@ -1,4 +1,4 @@
-//! `soft3 mine` — the reference miner of the phase-1 root chain
+//! `cybernode mine` — the reference miner of the phase-1 root chain
 //! (specs/chain.md §1.1–1.3, §8; chain-wire.md §7).
 //!
 //! The miner takes a header template from a node, grinds the 16-byte

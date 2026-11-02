@@ -1,7 +1,7 @@
 //! Local HTTP adapter over Cybergraph's durable native coordinator.
 //!
 //! Acceptance, economics and recovery are owned by Cybergraph and BBG.
-//! See `soft3/specs/native-node.md` for the HTTP and storage lifecycle contract.
+//! See `specs/native-node.md` for the HTTP and storage lifecycle contract.
 
 pub mod chain_node;
 mod chain_routes;
@@ -168,7 +168,7 @@ pub fn run(home: PathBuf, bind: &str, moniker: &str) -> io::Result<()> {
     let node = Node::open(home.clone(), moniker.to_owned())?;
     let listener = TcpListener::bind(bind)?;
     eprintln!(
-        "soft3 node · {} · moniker={} · home={}",
+        "cybernode · {} · moniker={} · home={}",
         node.network.chain_id(),
         moniker,
         home.display()
@@ -202,7 +202,7 @@ pub fn run_chain(opts: chain_node::ChainOpts, bind: &str) -> io::Result<()> {
     let node = chain_node::ChainNode::open(opts)?;
     let tip = node.chain.tip();
     eprintln!(
-        "soft3 node · chain {} · moniker={} · home={}",
+        "cybernode · chain {} · moniker={} · home={}",
         node.chain_name, node.moniker, node.home.display()
     );
     eprintln!("  endpoint {}", hex(node.net.id().as_bytes()));

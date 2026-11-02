@@ -1,7 +1,7 @@
 //! Product networks for the soft3 stack.
 //!
 //! Default after install: **spacepussy-test** — the soft3 chaosnet,
-//! hosted on cybernode (`rpc.spacepussy-test.soft3.org`).
+//! hosted on cyberproxy, an apparatus host (`rpc.spacepussy-test.soft3.org`).
 //!
 //! This is not the cosmos-sdk chain named `space-pussy` on cybernode
 //! (rpc.space-pussy.cybernode.ai). That bootloader chain is a migration
@@ -17,7 +17,7 @@ pub enum Network {
 }
 
 impl Network {
-    /// Product default after `cargo install soft3` / `true-cyber`.
+    /// Product default after `cargo install cybernode` / `true-cyber`.
     pub const DEFAULT: Network = Network::SpacePussyTest;
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -81,7 +81,7 @@ impl Network {
         }
     }
 
-    /// Local bind for `soft3 node` on the host (behind nginx on cyberproxy).
+    /// Local bind for `cybernode node` on the host (behind nginx on cyberproxy).
     pub fn local_bind(self) -> &'static str {
         match self {
             Self::SpacePussyTest => "127.0.0.1:7780",
@@ -161,7 +161,7 @@ pub fn probe(network: Network) -> Result<SyncStatus, String> {
         }
     }
     Err(format!(
-        "no soft3 node at {} — spacepussy-test offline or unreachable",
+        "no cybernode at {} — spacepussy-test offline or unreachable",
         network.rpc()
     ))
 }

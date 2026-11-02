@@ -4,7 +4,7 @@
 //! The scenarios run the block transition itself (`apply::transition`),
 //! not the miner: block ids are `hemera(D_BLOCK ‖ height ‖ prev ‖ root)`,
 //! there is no header and no proof of work, so the binary can bless them
-//! (`soft3 conformance bless chain`) without the test-only PoW limit. Every
+//! (`cybernode conformance bless chain`) without the test-only PoW limit. Every
 //! economy rule on the path — coinbase split, settlement at
 //! `boundary + D`, snapshots keyed by boundary id, the journal that a
 //! reorganization reverts — is the kernel's own code.
