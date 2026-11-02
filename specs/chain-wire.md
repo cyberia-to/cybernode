@@ -99,7 +99,11 @@ parent:
    when the chainwork rule says so (chain.md §5.1–5.2);
 4. headers on a chain whose fork point is deeper than `MAX_REORG` are
    stored (they are valid headers) but no bodies are requested; the event
-   is logged as a rejected deep fork.
+   is logged as a rejected deep fork;
+5. a header that is, or descends from, a `vetoed` id of the revert table
+   (chain.md §5.6) is invalid and never has its body requested; a header
+   whose rule set the node does not know sets `upgrade-required`
+   (chain.md §7.1).
 
 ### 3.2 initial block download
 
@@ -154,7 +158,9 @@ over size; +10 for an invalid signature, a non-canonical encoding, a header
 failing the time rule by more than 1 h; +1 for a duplicate; score decays by
 1 per minute; ≥ 100 bans the endpoint id
 for 1 h. Nothing is ever charged for a header that fails only the
-future-drift rule within the hold window, nor for a relayed transaction
+future-drift rule within the hold window, for a header vetoed by the revert
+table or descending from one, or for a header of an unknown rule set
+(a peer of another release is not an attacker, chain.md §5.6), nor for a relayed transaction
 whose nonce is outside the window (below it: already mined; above it: the
 relay holds blocks we lack — a busy account fills its window every block)
 or whose sender cannot fund it: each costs one signature check, bounded by
@@ -295,7 +301,11 @@ soft3/chain/1`, `rule-set`, `activations`, `engine: chain+cybergraph+bbg`,
 signs for), `genesis-block` (block 0's id), `genesis-time`, `bbg-root`,
 `supply`, `conserved: true|false`, `subsidy`, `neurons`, `particles`,
 `axons`, `mempool`, `peers`, `outbound`, `checkpoint`, `finalized`,
-`catching-up`, `mining: true|false` (a miner took a `/template` within the
+`catching-up`, `reverts` (the compiled revert table, chain.md §5.6),
+`reverted` (the last `Reverted`: height, kept id, vetoed ids, and
+`rehearsal: true` when it came from `--revert`), `upgrade-required:
+true|false` (with the height and rule set seen, chain.md §7.1),
+`mining: true|false` (a miner took a `/template` within the
 last 60 s; the node itself never mines), `storage: bbg-fjall`. true-cyber's sync probe reads `height`, `tip`, `catching-up` and
 `chain`, nothing else, so a chain node answers an unchanged client.
 
