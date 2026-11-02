@@ -583,6 +583,37 @@ fn cmd_chain(args: &[String]) {
             println!("{}", hex(&genesis.chain_id));
         }
         Some("key") => println!("{}", wallet(&flags).neuron_hex()),
+        // chain.md §5.6: the owner's revert statement, signed offline by the checkpoint
+        // key; the seed is read from the flag like `chain key --seed` and never stored
+        Some("revert-sign") => {
+            use crate::chain::params::{CHAINS, MAX_FUTURE_DRIFT};
+            let chain_id = match (flags.get("chain"), flags.get("genesis")) {
+                (Some(c), _) => unhex32(c)
+                    .or_else(|| CHAINS.iter().find(|x| x.name == c.as_str() && x.pinned()).map(|x| x.chain_id))
+                    .unwrap_or_else(|| die(format!("--chain {c}: a pinned chain name (pussy) or the 64 hex chain id"))),
+                (None, Some(g)) => {
+                    let bytes = std::fs::read(g).unwrap_or_else(|e| die(format!("--genesis {g}: {e}")));
+                    crate::chain::genesis::Genesis::decode(&bytes).unwrap_or_else(|e| die(format!("genesis: {e}"))).chain_id
+                }
+                (None, None) => die("--chain <name|64 hex id> (or --genesis FILE) required".into()),
+            };
+            let height: u64 = flags.get("height").and_then(|v| v.parse().ok()).unwrap_or_else(|| die("--height <H> required".into()));
+            let keep = flags.get("keep").and_then(|k| unhex32(k)).unwrap_or_else(|| die("--keep <64 hex block id at H> required".into()));
+            let counter: u64 = flags.get("counter").and_then(|v| v.parse().ok()).unwrap_or_else(|| die("--counter <N> required (above every counter signed before)".into()));
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let floor = now.saturating_add(MAX_FUTURE_DRIFT).saturating_add(1);
+            let anchor_time = num(&flags, "anchor-time", floor);
+            if anchor_time < floor {
+                die(format!("--anchor-time {anchor_time} is below now + {MAX_FUTURE_DRIFT} s drift + 1 s = {floor}: a block a node accepted before the statement could carry it"));
+            }
+            let seed = flags.get("seed").and_then(|s| unhex32(s)).unwrap_or_else(|| die("--seed <64 hex> required".into()));
+            let key = mudra::SigningKey::from_bytes((&seed).into()).unwrap_or_else(|e| die(format!("seed: {e}")));
+            let st = crate::chain::revert_statement::RevertStatement::sign(&chain_id, height, keep, counter, anchor_time, &key)
+                .unwrap_or_else(|e| die(format!("sign: {e}")));
+            println!("{}", hex(&st.encode()));
+            eprintln!("revert statement: chain {} height {height} keep {} counter {counter} anchor_time {anchor_time}", hex(&chain_id), hex(&keep));
+            eprintln!("submit: curl -X POST --data <the hex above> http://NODE/checkpoints/revert");
+        }
         Some("tx") => {
             let w = wallet(&flags);
             let bytes = flags.get("genesis").and_then(|g| std::fs::read(g).ok()).unwrap_or_else(|| die("--genesis <file> required (the chain id is its particle)".into()));
@@ -622,6 +653,7 @@ fn cmd_chain(args: &[String]) {
         _ => {
             eprintln!("usage: cybernode chain genesis-dev [--name dev] [--time T] [--bits HEX] [--fund NEURON=AMOUNT]… --out FILE");
             eprintln!("       cybernode chain key --seed HEX32");
+            eprintln!("       cybernode chain revert-sign --seed HEX32 --chain NAME|HEX32 --height H --keep HEX32 --counter N [--anchor-time T]");
             eprintln!("       cybernode chain tx --seed HEX32 --genesis FILE --nonce N [--kind transfer|link|unlock|payout] [--to N] [--amount A] [--fee F] [--p P --q Q] [--valence V] [--payout OWNER]");
             std::process::exit(2);
         }
@@ -679,7 +711,7 @@ fn print_help() {
     println!("  cybernode mine bench [--backend ...] [--threads N] [--seconds S]");
     println!("  cybernode node --chain <pussy|bostrom|dev> --home DIR --bind HOST:PORT --radio HOST:UDP --peers FILE --moniker NAME");
     println!("  cybernode node id --home DIR");
-    println!("  cybernode chain genesis-dev|key|tx …   # dev helpers");
+    println!("  cybernode chain genesis-dev|key|tx|revert-sign …   # dev helpers; revert-sign signs the owner's revert statement");
     println!("  cybernode genesis build --chain pussy|bostrom|pussy-rc --snapshot DIR --out FILE");
     println!("                      [--cache DIR] [--export DIR] [--no-root] [--time UNIX]");
     println!("  cybernode genesis verify FILE [--root]");
