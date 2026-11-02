@@ -96,7 +96,8 @@ cyberproxy as below. agent-a: see the variant after step 8.
    `bin/cybernode node --help` lists `--chain --radio --peers`.
 2. Scripts: copy `cybernode-check` to `/srv/forge/claude/chain/bin/` and
    `agent-a/*.sh` next to it (`SOFT3_CHECK` overrides where run-node.sh looks
-   for the check; it falls back to `PATH`, then to `../cybernode-check`).
+   for the check; order: `SOFT3_CHECK`, `PATH`, `cybernode-check` next to the script,
+   then `../cybernode-check`).
 3. Parameters: `agent-a.env.example` → `etc/<chain>.env`, `agent-a.peers.toml.example`
    → `etc/<chain>.peers.toml` with cyberproxy's id filled in.
 4. `SOFT3_ETC=/srv/forge/claude/chain/etc SOFT3_STATE=/srv/forge/claude/chain/state cybernode-check --pre <chain>`:
