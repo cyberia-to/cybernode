@@ -4,7 +4,7 @@
 //! anchor and the parent; the candidate's own time never enters. A
 //! floating-point `pow` anywhere here is a consensus bug.
 
-use super::header::{Header, clamp_bits};
+use super::header::{Header, clamp_bits, decode_bits};
 use super::params::{BLOCK_TIME, HALF_LIFE, MTP_WINDOW};
 use super::u256::U256;
 
@@ -48,10 +48,17 @@ pub fn factor(frac: u64) -> u64 {
 
 /// ASERT for the block after `parent` (§1.5), with every intermediate.
 pub fn asert(anchor: Anchor, parent_height: u64, parent_time: u64) -> Asert {
+    asert_ideal(anchor, parent_height, parent_time)
+}
+
+/// The formula of §1.5 with the ideal clock given in blocks since the
+/// anchor: `parent_height` from genesis, `parent_height − H − 1` above a
+/// revert at `H` (§5.6).
+pub fn asert_ideal(anchor: Anchor, ideal_blocks: u64, parent_time: u64) -> Asert {
     // i128 so no realistic or hostile height/time can overflow; `e` itself
     // is saturated into i64, far beyond where the clamp already binds.
     let dt = parent_time as i128 - anchor.time as i128;
-    let ideal = parent_height as i128 * BLOCK_TIME as i128;
+    let ideal = ideal_blocks as i128 * BLOCK_TIME as i128;
     let e = floor_div_i128((dt - ideal) * 65_536, HALF_LIFE as i128);
     let e = e.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
     let shifts = e >> 16;
@@ -76,6 +83,37 @@ pub fn asert(anchor: Anchor, parent_height: u64, parent_time: u64) -> Asert {
 /// Expected `bits` of the block after `parent` (§5.5 step 4).
 pub fn next_bits(anchor: Anchor, parent: &Header) -> u32 {
     asert(anchor, parent.height, parent.time).bits
+}
+
+/// A revert's re-anchor (§1.5, §5.6): for blocks above `height + 1` the
+/// anchor time is `anchor_time` and the anchor target is the target of block
+/// `height + 1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReAnchor {
+    pub height: u64,
+    pub anchor_time: u64,
+}
+
+/// Expected `bits` of the block after `parent` under a revert table
+/// (`reanchors`, ascending by height). `ancestor(h)` gives the header at
+/// height `h` on the parent's own branch. For `h = parent.height + 1 > H + 1`
+/// of the latest entry: `Δt = parent.time − anchor_time`,
+/// `ideal = (h − H − 2)·T`, anchor target = target(bits_{H+1}) where
+/// `bits_{H+1}` is this same function applied to the parent at `H` (with the
+/// earlier entries). With no entry below the parent it is [`next_bits`].
+pub fn next_bits_reverted(anchor: Anchor, reanchors: &[ReAnchor], parent: &Header, ancestor: &dyn Fn(u64) -> Option<Header>) -> u32 {
+    let Some(i) = reanchors.iter().rposition(|r| r.height < parent.height) else {
+        return next_bits(anchor, parent);
+    };
+    let r = reanchors[i];
+    let Some(base_parent) = ancestor(r.height) else {
+        return next_bits(anchor, parent);
+    };
+    let base_bits = next_bits_reverted(anchor, &reanchors[..i], &base_parent, ancestor);
+    let Ok(target) = decode_bits(base_bits) else {
+        return next_bits(anchor, parent);
+    };
+    asert_ideal(Anchor { target, time: r.anchor_time }, parent.height - r.height - 1, parent.time).bits
 }
 
 /// Median time past of the last `MTP_WINDOW` headers (§1.4): `times` holds

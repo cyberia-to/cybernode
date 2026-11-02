@@ -26,6 +26,7 @@ pub mod net;
 pub mod params;
 pub mod pool;
 pub mod pow;
+pub mod revert;
 pub mod select;
 pub mod sigs;
 pub mod state;
