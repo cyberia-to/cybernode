@@ -6,6 +6,7 @@ use super::apply::{self, TxError};
 use super::engine::Chain;
 use super::genesis::Genesis;
 use super::header::{BlockId, Header};
+use super::revert_statement::{RevertStatement, StatementError};
 use super::select::{self, Checkpoint};
 use super::state::{Id, StateBackend};
 use super::store;
@@ -177,6 +178,14 @@ impl ChainApi for Chain {
 
     fn checkpoints(&self) -> Vec<(u64, BlockId)> {
         self.checkpoints.held().map(|(h, id)| (*h, *id)).collect()
+    }
+
+    fn accept_revert_statement(&mut self, st: &RevertStatement) -> Result<bool, StatementError> {
+        self.hold_revert_statement(st)
+    }
+
+    fn revert_statements(&self) -> Vec<RevertStatement> {
+        self.held_statements().to_vec()
     }
 
     fn validate_tx(&mut self, tx_bytes: &[u8], pending: &[Tx]) -> Result<TxInfo, TxError> {

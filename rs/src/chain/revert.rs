@@ -1,5 +1,6 @@
 //! Revert by release (chain.md §5.6): the effective revert table (the
 //! compiled [`REVERTS`] plus the rehearsal entries of `--revert`), its
+//! revert statements of the owner key (`revert_statement.rs`), its
 //! consistency checks, the rule sets and difficulty anchors it implies, the
 //! `--revert` flag syntax and the small log of the reverts a node applied.
 //!
@@ -15,7 +16,9 @@ use super::net::codec::{hex, unhex32};
 use super::params::{ACTIVATIONS, REVERTS, Revert};
 use super::store::Store;
 
-/// One revert, runtime form. `rule_set == 0` is only valid before
+/// One revert, runtime form. An entry of `counter > 0` stands for a revert
+/// statement of the owner key (§5.6): `vetoed` is empty, the time floor and
+/// the descendants of the invalid blocks do the vetoing. `rule_set == 0` is only valid before
 /// [`RevertTable::new`], which resolves it to "the last known rule set + 1"
 /// (a rehearsal entry given without a fifth `--revert` field).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,11 +30,14 @@ pub struct RevertEntry {
     pub rule_set: u16,
     /// from `--revert`, not from the compiled table
     pub rehearsal: bool,
+    /// the counter of the revert statement this entry stands for; 0 for a
+    /// compiled or rehearsal entry
+    pub counter: u64,
 }
 
 impl From<&Revert> for RevertEntry {
     fn from(r: &Revert) -> RevertEntry {
-        RevertEntry { height: r.height, keep: r.keep, vetoed: r.vetoed.to_vec(), anchor_time: r.anchor_time, rule_set: r.rule_set, rehearsal: false }
+        RevertEntry { height: r.height, keep: r.keep, vetoed: r.vetoed.to_vec(), anchor_time: r.anchor_time, rule_set: r.rule_set, rehearsal: false, counter: 0 }
     }
 }
 
@@ -40,13 +46,14 @@ impl RevertEntry {
     pub fn describe(&self) -> String {
         let vetoed: Vec<String> = self.vetoed.iter().map(|v| hex(v)).collect();
         format!(
-            "{}:{}:{}:{}:{}{}",
+            "{}:{}:{}:{}:{}{}{}",
             self.height,
             hex(&self.keep),
             vetoed.join("+"),
             self.anchor_time,
             self.rule_set,
-            if self.rehearsal { ":rehearsal" } else { "" }
+            if self.rehearsal { ":rehearsal" } else { "" },
+            if self.counter > 0 { format!(":statement{}", self.counter) } else { String::new() }
         )
     }
 }
@@ -60,6 +67,12 @@ pub struct RevertTable {
 
 fn compiled_last_rule_set() -> u16 {
     ACTIVATIONS.iter().map(|(r, _)| *r).max().unwrap_or(0)
+}
+
+/// The highest rule set the compiled tables name, the activations and the
+/// compiled reverts: a statement of counter `n` carries this plus `n` (§5.6).
+pub fn compiled_max_rule_set() -> u16 {
+    REVERTS.iter().map(|r| r.rule_set).fold(compiled_last_rule_set(), u16::max)
 }
 
 impl RevertTable {
@@ -84,6 +97,14 @@ impl RevertTable {
         RevertTable { entries }
     }
 
+    /// This table with the entries of the held revert statements appended
+    /// (`RevertStatementSet::entries`): ascending by height and above the
+    /// compiled ones, which [`RevertTable::check_static`] checks.
+    pub fn with_statements(mut self, statements: Vec<RevertEntry>) -> RevertTable {
+        self.entries.extend(statements);
+        self
+    }
+
     /// The table this release compiles in, with `rehearsal` added.
     pub fn effective(rehearsal: Vec<RevertEntry>) -> RevertTable {
         RevertTable::new(REVERTS, rehearsal)
@@ -99,6 +120,10 @@ impl RevertTable {
 
     pub fn any_rehearsal(&self) -> bool {
         self.entries.iter().any(|e| e.rehearsal)
+    }
+
+    pub fn any_statement(&self) -> bool {
+        self.entries.iter().any(|e| e.counter > 0)
     }
 
     /// Every vetoed id of every entry.
@@ -120,7 +145,7 @@ impl RevertTable {
             if i > 0 && e.height <= self.entries[i - 1].height {
                 return Err(format!("{at}: entries must be sorted by strictly ascending height"));
             }
-            if e.vetoed.is_empty() {
+            if e.vetoed.is_empty() && e.counter == 0 {
                 return Err(format!("{at}: vetoed is empty"));
             }
             if e.vetoed.contains(&e.keep) {
@@ -208,6 +233,12 @@ impl RevertTable {
         self.entries.iter().find(|e| e.height.saturating_add(1) == height).map(|e| e.anchor_time)
     }
 
+    /// The `anchor_time` of the statement entry whose `H + 1` is `height`:
+    /// the floor the open-time rollback also applies to stored blocks.
+    pub fn statement_floor(&self, height: u64) -> Option<u64> {
+        self.entries.iter().find(|e| e.counter > 0 && e.height.saturating_add(1) == height).map(|e| e.anchor_time)
+    }
+
     /// The latest entry at or below `height`, for naming the checkpoint a
     /// vetoed header contradicts.
     pub fn latest_at_or_below(&self, height: u64) -> Option<&RevertEntry> {
@@ -249,7 +280,9 @@ impl Reverted {
         let mut it = line.split(' ');
         let to_height = it.next()?.parse().ok()?;
         let keep = unhex32(it.next()?)?;
-        let vetoed = it.next()?.split(',').map(unhex32).collect::<Option<Vec<_>>>()?;
+        // a statement entry vetoes nothing: the field is empty
+        let field = it.next()?;
+        let vetoed = if field.is_empty() { Vec::new() } else { field.split(',').map(unhex32).collect::<Option<Vec<_>>>()? };
         let rehearsal = it.next()? == "1";
         Some(Reverted { to_height, keep, vetoed, rehearsal })
     }
@@ -293,7 +326,7 @@ pub fn parse_flag(s: &str) -> Result<RevertEntry, String> {
         Some(r) => r.parse().map_err(|e| format!("--revert rule_set {r:?}: {e}"))?,
         None => 0,
     };
-    Ok(RevertEntry { height, keep, vetoed, anchor_time, rule_set, rehearsal: true })
+    Ok(RevertEntry { height, keep, vetoed, anchor_time, rule_set, rehearsal: true, counter: 0 })
 }
 
 #[cfg(test)]
@@ -301,7 +334,7 @@ mod tests {
     use super::*;
 
     fn entry(height: u64, keep: u8, vetoed: u8, rule_set: u16) -> RevertEntry {
-        RevertEntry { height, keep: [keep; 32], vetoed: vec![[vetoed; 32]], anchor_time: 1_000, rule_set, rehearsal: true }
+        RevertEntry { height, keep: [keep; 32], vetoed: vec![[vetoed; 32]], anchor_time: 1_000, rule_set, rehearsal: true, counter: 0 }
     }
 
     #[test]
@@ -361,9 +394,27 @@ mod tests {
     }
 
     #[test]
+    fn a_statement_entry_may_veto_nothing_and_a_rehearsal_may_not() {
+        let mut st = entry(10, 1, 2, 2);
+        st.vetoed.clear();
+        st.rehearsal = false;
+        st.counter = 1;
+        let t = RevertTable { entries: vec![st.clone()] };
+        assert_eq!(t.check_static(), Ok(()));
+        assert!(t.any_statement() && !t.any_rehearsal());
+        assert_eq!(t.statement_floor(11), Some(1_000));
+        assert_eq!(t.statement_floor(12), None);
+        assert!(st.describe().ends_with(":statement1"));
+        let compiled_like = RevertEntry { counter: 0, ..st };
+        assert!(RevertTable { entries: vec![compiled_like] }.check_static().unwrap_err().contains("vetoed is empty"));
+    }
+
+    #[test]
     fn the_log_line_round_trips() {
         let r = Reverted { to_height: 9, keep: [1; 32], vetoed: vec![[2; 32], [3; 32]], rehearsal: true };
         assert_eq!(Reverted::from_line(&r.to_line()), Some(r));
         assert_eq!(Reverted::from_line("garbage"), None);
+        let none = Reverted { to_height: 9, keep: [1; 32], vetoed: Vec::new(), rehearsal: false };
+        assert_eq!(Reverted::from_line(&none.to_line()), Some(none));
     }
 }

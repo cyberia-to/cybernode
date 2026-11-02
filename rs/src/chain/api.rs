@@ -10,6 +10,7 @@ use super::apply::{BlockError, TxError};
 use super::genesis::Genesis;
 use super::header::{BlockId, Header, HeaderError};
 use super::revert::{RevertEntry, Reverted};
+use super::revert_statement::{RevertStatement, StatementError};
 use super::select::{Checkpoint, CheckpointError};
 use super::state::Id;
 use super::tx::Tx;
@@ -261,6 +262,13 @@ pub trait ChainApi {
     /// §5.3; `Ok(true)` when new
     fn accept_checkpoint(&mut self, cp: &Checkpoint) -> Result<bool, ChainError>;
     fn checkpoints(&self) -> Vec<(u64, BlockId)>;
+    /// §5.6: hold a revert statement of the owner key and apply it by the
+    /// open-time rollback, at any depth; `Ok(true)` when it is new,
+    /// `Ok(false)` when it changes nothing (duplicate, counter not above
+    /// the highest held). The transactions of the retracted blocks are dropped.
+    fn accept_revert_statement(&mut self, st: &RevertStatement) -> Result<bool, StatementError>;
+    /// the held revert statements, ascending by counter
+    fn revert_statements(&self) -> Vec<RevertStatement>;
     /// mempool admission (chain-wire §4): decode, signature, nonce within
     /// `NONCE_WINDOW` given `pending` (the mempool's txs of the same
     /// account, applied first in nonce order), fee floor, balances and

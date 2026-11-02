@@ -199,6 +199,8 @@ pub const DOMAIN_TXID: &[u8] = b"soft3/chain/txid/v1\0";
 pub const DOMAIN_SIGN: &[u8] = b"soft3/chain/sign/v1\0";
 pub const DOMAIN_LEGACY: &[u8] = b"soft3/chain/legacy/v1\0";
 pub const DOMAIN_CHECKPOINT: &[u8] = b"soft3/chain/checkpoint/v1\0";
+/// The revert statement's own tag (§5.6): never the checkpoint's.
+pub const DOMAIN_REVERT: &[u8] = b"soft3/chain/revert/v1\0";
 pub const DOMAIN_TOPIC: &[u8] = b"soft3/chain/topic/v1\0";
 
 /// `POW_LIMIT` as a target.

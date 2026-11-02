@@ -1,9 +1,9 @@
 //! Identities and signatures: txid and statement (§2.1), NSIG1 through mudra
 //! (§2.7), the legacy owner and claim rules (§2.8), tokens (§3.1), the
-//! checkpoint statement (§5.3) and gossip topic ids (chain-wire §2).
+//! checkpoint statement (§5.3), the revert statement (§5.6) and gossip topic ids (chain-wire §2).
 
 use super::header::hash32;
-use super::params::DOMAIN_CHECKPOINT;
+use super::params::{DOMAIN_CHECKPOINT, DOMAIN_REVERT};
 use super::tx::{Body, SIG_BYTES, Tx};
 
 pub use crate::wallet::tx::{legacy_owner, neuron_of, statement, token, topic, txid};
@@ -22,6 +22,12 @@ fn tagged(tag: &[u8], parts: &[&[u8]]) -> [u8; 32] {
 /// Statement a checkpoint signer signs (§5.3).
 pub fn checkpoint_statement(chain: &[u8; 32], height: u64, block_id: &[u8; 32]) -> [u8; 32] {
     tagged(DOMAIN_CHECKPOINT, &[chain, &height.to_le_bytes(), block_id])
+}
+
+/// Statement the owner signs for a revert statement (§5.6): its own domain
+/// tag, so a checkpoint signature never verifies as a revert or conversely.
+pub fn revert_statement(version: u8, chain: &[u8; 32], height: u64, keep: &[u8; 32], counter: u64, anchor_time: u64) -> [u8; 32] {
+    tagged(DOMAIN_REVERT, &[&[version], chain, &height.to_le_bytes(), keep, &counter.to_le_bytes(), &anchor_time.to_le_bytes()])
 }
 
 /// The 33-byte public key inside an NSIG1 envelope, if well-formed.
