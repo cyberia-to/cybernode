@@ -85,7 +85,14 @@ impl Header {
 
     /// §5.5 step 1 on a decoded header.
     pub fn check_syntax(&self, chain: &[u8; 32]) -> Result<(), HeaderError> {
-        if self.rule_set() != RULE_SET {
+        self.check_syntax_for(chain, RULE_SET)
+    }
+
+    /// As [`Header::check_syntax`] with the rule set the block's height
+    /// requires (the activation table extended by the revert entries,
+    /// §7.1, §5.6) in place of the compiled `RULE_SET`.
+    pub fn check_syntax_for(&self, chain: &[u8; 32], rule_set: u16) -> Result<(), HeaderError> {
+        if self.rule_set() != rule_set {
             return Err(HeaderError::RuleSet(self.rule_set()));
         }
         if &self.chain != chain {

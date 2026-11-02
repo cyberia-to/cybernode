@@ -4,6 +4,7 @@
 mod corpus;
 mod economy;
 mod forks;
+mod revert;
 mod rules;
 mod simulate;
 
@@ -11,12 +12,13 @@ use std::path::PathBuf;
 
 use crate::genesis::file::{Balance, GenesisFile, Link};
 
-use super::api::{Block, ChainApi, Template};
+use super::api::{Block, ChainApi, ChainError, Template};
 use super::engine::{Chain, OpenOptions};
 use super::params::EpochClock;
 use super::genesis::{Genesis, Params};
 use super::header::Header;
 use super::params::test_pow;
+use super::revert::RevertEntry;
 use super::pow::valid_pow;
 use super::sigs::{self, legacy_owner, neuron_of, token};
 use super::state::Id;
@@ -59,6 +61,16 @@ impl Net {
 
     /// As [`Net::new`] with `funds` per account.
     pub fn with_funds(accounts: u8, funds: u64) -> Net {
+        Net::with_funds_named(accounts, funds, "test")
+    }
+
+    /// As [`Net::new`] with the genesis naming chain `name` (a launch
+    /// chain's name makes the engine treat it as a production chain).
+    pub fn named(accounts: u8, name: &str) -> Net {
+        Net::with_funds_named(accounts, FUNDS, name)
+    }
+
+    fn with_funds_named(accounts: u8, funds: u64, name: &str) -> Net {
         test_pow::relax();
         let keys: Vec<_> = (0..accounts).map(key).collect();
         let neurons: Vec<Id> = keys.iter().map(|k| neuron_of(&pubkey(k))).collect();
@@ -73,7 +85,7 @@ impl Net {
         let file = GenesisFile {
             params: Params {
                 version: 1,
-                name: "test".into(),
+                name: name.into(),
                 hrp: "pussy".into(),
                 denom: "pussy".into(),
                 time: GENESIS_TIME,
@@ -110,23 +122,43 @@ impl Net {
     }
 
     pub fn open_with(&self, label: &str, checkpoints: bool) -> Chain {
+        self.open_dir(label, checkpoints, Vec::new())
+    }
+
+    /// A fresh chain store opened with rehearsal revert entries (§5.6).
+    pub fn open_reverts(&self, label: &str, reverts: Vec<RevertEntry>) -> Chain {
+        self.open_dir(label, true, reverts)
+    }
+
+    fn open_dir(&self, label: &str, checkpoints: bool, reverts: Vec<RevertEntry>) -> Chain {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut dir = std::env::temp_dir();
         dir.push(format!("soft3-chain-test-{label}-{}-{seq}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         self.dirs.borrow_mut().push(dir.clone());
-        Chain::open_with(&dir, &self.genesis.bytes, self.options(checkpoints)).unwrap()
+        let mut opts = self.options(checkpoints);
+        opts.reverts = reverts;
+        Chain::open_with(&dir, &self.genesis.bytes, opts).unwrap()
     }
 
     fn options(&self, checkpoints: bool) -> OpenOptions {
-        OpenOptions { checkpoints, clock: self.clock, engine: self.engine.clone(), inline_settlement: self.inline_settlement, quadrature: 0 }
+        OpenOptions { checkpoints, clock: self.clock, engine: self.engine.clone(), inline_settlement: self.inline_settlement, quadrature: 0, reverts: Vec::new() }
     }
 
     /// Reopen the store of chain `index` (recovery path).
     pub fn reopen(&self, index: usize) -> Chain {
         let dir = self.dirs.borrow()[index].clone();
         Chain::open_with(&dir, &self.genesis.bytes, self.options(true)).unwrap()
+    }
+
+    /// Reopen the store of chain `index` with rehearsal revert entries; the
+    /// previous handle on that store must be dropped first.
+    pub fn reopen_with(&self, index: usize, reverts: Vec<RevertEntry>) -> Result<Chain, ChainError> {
+        let dir = self.dirs.borrow()[index].clone();
+        let mut opts = self.options(true);
+        opts.reverts = reverts;
+        Chain::open_with(&dir, &self.genesis.bytes, opts)
     }
 
     pub fn unlock(&self, from: usize, nonce: u64, p: Id, q: Id, amount: u64, fee: u64) -> Vec<u8> {
