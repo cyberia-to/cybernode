@@ -8,7 +8,7 @@ alias: routing, the wire obeys the graph, locus routing, greedy routing, hyperbo
 
 # routing — the wire obeys the graph
 
-How a soft3 node decides whom to dial and whom to forward to. The rule is a
+How a cybernode decides whom to dial and whom to forward to. The rule is a
 composition: the address record comes from [cybergraph](https://github.com/cyberia-to/cybergraph/blob/master/specs/address.md)
 (FOLLOW, ANTENNA, SOCKET, LOCUS), the coordinate from
 [tru](https://github.com/cyberia-to/tru/blob/master/specs/locus.md) (locus),

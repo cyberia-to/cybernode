@@ -10,6 +10,7 @@ use serde::Deserialize;
 use super::chain_node::{ChainNode, SubmitError};
 use super::http::{Error, Request, Response};
 use crate::chain::net::codec::{self, hex, txid, unhex32, Header, Tx};
+use crate::chain::revert_statement::RevertStatement;
 use crate::chain::net::mempool::AdmitError;
 use crate::chain::net::peers::Direction;
 
@@ -150,6 +151,22 @@ fn tx_body(body: &[u8]) -> Result<Vec<u8>, Error> {
     (0..hex_str.len()).step_by(2).map(|i| u8::from_str_radix(hex_str.get(i..i + 2).ok_or_else(|| Error::bad("odd hex length"))?, 16).map_err(|_| Error::bad("invalid hex"))).collect()
 }
 
+/// A revert statement body: raw bytes, hex, or `{"statement": hex}`.
+fn statement_body(body: &[u8]) -> Result<Vec<u8>, Error> {
+    #[derive(Deserialize)]
+    struct StatementBody {
+        statement: String,
+    }
+    if let Ok(text) = std::str::from_utf8(body) {
+        let text = text.trim();
+        if text.starts_with('{') {
+            let hex_str = serde_json::from_str::<StatementBody>(text).map_err(|e| Error::bad(e.to_string()))?.statement;
+            return tx_body(hex_str.as_bytes());
+        }
+    }
+    tx_body(body)
+}
+
 pub(super) fn route(node: &ChainNode, request: Request) -> Result<Response, Error> {
     let path = if request.path == "/" { "/" } else { request.path.trim_end_matches('/') };
     let q = request.query.as_str();
@@ -166,7 +183,7 @@ pub(super) fn route(node: &ChainNode, request: Request) -> Result<Response, Erro
             )))
         }
         ("GET", "/") => Ok(Response::text(format!(
-            "soft3 · {} · chain+cybergraph+bbg\nmoniker {}\nheight {}\nGET /status /tip /header/H /block/H /blocks /tx/ID /nonce/N /balance/N /balances/N /mempool /peers /checkpoints /template?to=N /v2/history /economy /epoch/E /epochs /focus /focus/P /card/C /cards/N\nPOST /tx /submit\n",
+            "soft3 · {} · chain+cybergraph+bbg\nmoniker {}\nheight {}\nGET /status /tip /header/H /block/H /blocks /tx/ID /nonce/N /balance/N /balances/N /mempool /peers /checkpoints /template?to=N /v2/history /economy /epoch/E /epochs /focus /focus/P /card/C /cards/N\nPOST /tx /submit /checkpoints/revert\n",
             node.chain_name, node.moniker, node.chain.tip().height,
         ))),
         // chain-wire §7: the kernel renders the answer
@@ -276,7 +293,20 @@ pub(super) fn route(node: &ChainNode, request: Request) -> Result<Response, Erro
         }
         ("GET", "/checkpoints") => {
             let list: Vec<_> = node.net.checkpoints().iter().map(|c| serde_json::json!({"height": c.height, "block": hex(&c.block_id), "sig": hex(&c.sig)})).collect();
-            Ok(json(serde_json::json!({"checkpoints": list})))
+            // the owner's revert statements (chain.md §5.6), ascending by counter
+            let reverts: Vec<_> = node.chain.revert_statements().iter().filter_map(|b| RevertStatement::decode(b)).map(|st| serde_json::json!({
+                "height": st.height, "keep": hex(&st.keep), "counter": st.counter, "anchor_time": st.anchor_time,
+                "sig": hex(&st.sig), "statement": hex(&st.encode()),
+            })).collect();
+            Ok(json(serde_json::json!({"checkpoints": list, "reverts": reverts})))
+        }
+        // chain.md §5.6: the owner's revert statement, hex (or `{"statement": hex}`); 422 when refused
+        ("POST", "/checkpoints/revert") => {
+            let bytes = statement_body(&request.body)?;
+            match node.runtime.block_on(node.net.publish_revert(&bytes)) {
+                Ok(new) => Ok(json(serde_json::json!({"accepted": true, "new": new, "statements": node.chain.revert_statements().len()}))),
+                Err(e) => Err(error("422 Unprocessable Content", "revert_statement_rejected", e)),
+            }
         }
         ("GET", "/template") => {
             let to = query(q, "to")?.and_then(|t| unhex32(&t)).ok_or_else(|| Error::bad("to=<64 hex neuron> required"))?;

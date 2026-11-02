@@ -9,6 +9,8 @@
 use super::apply::{BlockError, TxError};
 use super::genesis::Genesis;
 use super::header::{BlockId, Header, HeaderError};
+use super::revert::{RevertEntry, Reverted};
+use super::revert_statement::{RevertStatement, StatementError};
 use super::select::{Checkpoint, CheckpointError};
 use super::state::Id;
 use super::tx::Tx;
@@ -185,10 +187,14 @@ impl Tip {
 }
 
 /// Finalized block stream for the shadow indexers (§7.3): emitted once a
-/// block is `FINALITY_DEPTH` deep, never reorged.
+/// block is `FINALITY_DEPTH` deep, never reorged — except by `Reverted`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Block { header: Header, body: Vec<u8>, state_root: Id },
+    /// A revert by release (§5.6) applied at open: the chain returned to
+    /// `keep` at `to_height`; blocks above it that were delivered earlier no
+    /// longer exist. Delivered before any finalized block above `to_height`.
+    Reverted { to_height: u64, keep: BlockId, vetoed: Vec<BlockId>, rehearsal: bool },
 }
 
 /// `/status` fields the chain owns (chain-wire §7).
@@ -213,6 +219,13 @@ pub struct Status {
     pub axons: u64,
     pub checkpoint: Option<u64>,
     pub finalized: u64,
+    /// the effective revert table (§5.6), compiled plus rehearsal entries
+    pub reverts: Vec<RevertEntry>,
+    /// the last revert this node applied (§5.6)
+    pub reverted: Option<Reverted>,
+    /// a block of valid proof of work named a rule set this node does not
+    /// know: `(height, rule_set)` last seen (§7.1)
+    pub upgrade_required: Option<(u64, u16)>,
 }
 
 /// The chain as the other layers see it.
@@ -249,6 +262,13 @@ pub trait ChainApi {
     /// §5.3; `Ok(true)` when new
     fn accept_checkpoint(&mut self, cp: &Checkpoint) -> Result<bool, ChainError>;
     fn checkpoints(&self) -> Vec<(u64, BlockId)>;
+    /// §5.6: hold a revert statement of the owner key and apply it by the
+    /// open-time rollback, at any depth; `Ok(true)` when it is new,
+    /// `Ok(false)` when it changes nothing (duplicate, counter not above
+    /// the highest held). The transactions of the retracted blocks are dropped.
+    fn accept_revert_statement(&mut self, st: &RevertStatement) -> Result<bool, StatementError>;
+    /// the held revert statements, ascending by counter
+    fn revert_statements(&self) -> Vec<RevertStatement>;
     /// mempool admission (chain-wire §4): decode, signature, nonce within
     /// `NONCE_WINDOW` given `pending` (the mempool's txs of the same
     /// account, applied first in nonce order), fee floor, balances and

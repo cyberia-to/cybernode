@@ -1,4 +1,4 @@
-# soft3 root-chain HTTP API behind nginx — one snippet per chain instance.
+# cybernode root-chain HTTP API behind nginx — one snippet per chain instance.
 # Render: sed -e 's/@CHAIN@/pussy/g' -e 's/@BIND@/127.0.0.1:7781/g' nginx-chain-api.conf.template \
 #           | sudo tee /etc/nginx/snippets/cybernode-pussy.conf
 # Include inside the public 443 server block (cyb.ai on cyberproxy, deimos.cybernode.ai on deimos):

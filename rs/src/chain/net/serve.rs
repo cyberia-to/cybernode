@@ -186,6 +186,11 @@ pub(crate) async fn answer(inner: &Arc<Inner>, id: radio::EndpointId, request: F
             for c in inner.checkpoints.lock().expect("checkpoints").iter().filter(|c| c.height >= from_height) {
                 out.push(Frame::Checkpoint(c.clone()));
             }
+            // the revert statements of the owner key (chain.md §5.6), all of them whatever
+            // `from_height`: they are few, and a lagging node needs every one
+            for bytes in chain.revert_statements() {
+                out.push(Frame::Revert(bytes));
+            }
         }
         _ => return vec![Frame::Error { code: ERR_UNKNOWN, reason: "not a request".into() }],
     }

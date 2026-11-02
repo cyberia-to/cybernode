@@ -286,7 +286,7 @@ Computed on 2026-10-16 against hemera 0.4 (`cyber-hemera` 0.4.0 at
 0.3 values of the same day were re-blessed through the same code, the
 definitions did not move) through the hemera API alone —
 `Hasher::finalize_xof` for `W` (chain.md §11.1) and the tree node (§11.4),
-`hemera::hash` for the narrow values — by `crate/src/chain/pool/` (tests
+`hemera::hash` for the narrow values — by `rs/src/chain/pool/` (tests
 `chain::pool::tests`). They are blessed
 as `chain::pool@v1` entries of `conformance/chain.snap`; a snapshot line
 holds 32 bytes, so a wide value enters it as `hemera(value)`, its
@@ -358,8 +358,8 @@ rule-set-1 decoder (§6).
 `cargo test -p soft3 --features chain-conformance` runs sections 1–9, 11,
 12 and 14 on every commit; section 10 runs in the release train (`stack-chain-genesis`
 gate) because it needs the pinned snapshot inputs. Blessed values are
-written by `soft3 conformance bless chain` into `conformance/chain.snap`
-(and checked by `soft3 conformance check chain`); the genesis entries of
+written by `cybernode conformance bless chain` into `conformance/chain.snap`
+(and checked by `cybernode conformance check chain`); the genesis entries of
 §10 need the genesis file (`--genesis FILE`, default
 `~/.cache/cyber/genesis/pussy.tade`) and are kept as they are when it is
 absent. They are reviewed in the PR that moves them. The report of each run goes to `cybernode/audit/chain/conformance-<date>.md`

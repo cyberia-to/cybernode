@@ -3,11 +3,10 @@
 
 use super::api::{Block, BlockVerdict, ChainApi, ChainError, Event, HeaderVerdict, Status, Template, Tip, TxInfo};
 use super::apply::{self, TxError};
-use super::daa::next_bits;
 use super::engine::Chain;
 use super::genesis::Genesis;
 use super::header::{BlockId, Header};
-use super::params::RULE_SET;
+use super::revert_statement::{RevertStatement, StatementError};
 use super::select::{self, Checkpoint};
 use super::state::{Id, StateBackend};
 use super::store;
@@ -36,12 +35,12 @@ impl ChainApi for Chain {
         Status {
             chain: self.rules.chain,
             name: self.genesis.params().name.clone(),
-            rule_set: RULE_SET,
+            rule_set: self.rule_set_for(tip.height),
             height: tip.height,
             tip: tip.id,
             chainwork: tip.chainwork,
             bits: tip.header.bits,
-            next_bits: next_bits(self.genesis.anchor(), &tip.header),
+            next_bits: self.bits_after(&tip.header),
             genesis_block: self.store.main_at(0).unwrap_or([0; 32]),
             genesis_time: self.genesis.params().time,
             state_root: tip.header.state_root,
@@ -53,6 +52,9 @@ impl ChainApi for Chain {
             axons: self.state.axon_count(),
             checkpoint: self.checkpoints.floor(),
             finalized: self.finalized,
+            reverts: self.reverts.entries().to_vec(),
+            reverted: self.reverted.clone(),
+            upgrade_required: self.upgrade_required,
         }
     }
 
@@ -108,7 +110,7 @@ impl ChainApi for Chain {
 
     fn accept_header(&mut self, header: &Header, now: u64) -> Result<HeaderVerdict, ChainError> {
         let id = header.id();
-        if self.vetoed.contains(&id) {
+        if self.vetoed.contains(&id) || self.revert_vetoed.contains(&id) {
             return Err(self.vetoed_error(header.height));
         }
         if self.rejected.contains(&id) {
@@ -117,7 +119,13 @@ impl ChainApi for Chain {
         if let Some(e) = self.entry(&id) {
             return if e.status == store::Status::Invalid { Err(ChainError::Rejected(id)) } else { Ok(HeaderVerdict::Known) };
         }
-        let work = self.check_header(header, now)?;
+        let work = match self.check_header(header, now) {
+            Ok(work) => work,
+            Err(e) => {
+                self.note_unknown_rule_set(header, &e);
+                return Err(e);
+            }
+        };
         self.store.put_header(*header, work, store::Status::Header).map_err(ChainError::Store)?;
         self.heaviest = self.heaviest.max(work);
         Ok(HeaderVerdict::Accepted)
@@ -170,6 +178,14 @@ impl ChainApi for Chain {
 
     fn checkpoints(&self) -> Vec<(u64, BlockId)> {
         self.checkpoints.held().map(|(h, id)| (*h, *id)).collect()
+    }
+
+    fn accept_revert_statement(&mut self, st: &RevertStatement) -> Result<bool, StatementError> {
+        self.hold_revert_statement(st)
+    }
+
+    fn revert_statements(&self) -> Vec<RevertStatement> {
+        self.held_statements().to_vec()
     }
 
     fn validate_tx(&mut self, tx_bytes: &[u8], pending: &[Tx]) -> Result<TxInfo, TxError> {

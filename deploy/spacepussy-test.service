@@ -1,5 +1,5 @@
 [Unit]
-Description=spacepussy-test soft3 node (cybergraph+bbg)
+Description=spacepussy-test cybernode (cybergraph+bbg chaosnet)
 After=network.target
 
 [Service]
@@ -8,7 +8,7 @@ User=cyber
 Group=cyber
 Environment=HOME=/home/cyber
 Environment=PATH=/home/cyber/.cargo/bin:/usr/local/bin:/usr/bin
-ExecStart=/home/cyber/.cargo/bin/soft3 node --home /home/cyber/spacepussy-test/data --bind 127.0.0.1:7780 --moniker cyberproxy-spt
+ExecStart=/home/cyber/.cargo/bin/cybernode node --home /home/cyber/spacepussy-test/data --bind 127.0.0.1:7780 --moniker cyberproxy-spt
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=65536
