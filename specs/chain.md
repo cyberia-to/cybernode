@@ -243,6 +243,8 @@ Behavior:
   blocks resume, because ASERT measures absolute drift, not per-block deltas.
 - clock drift in the network is irrelevant beyond the two rules above; nodes
   need no synchronized clocks to agree on targets.
+- above a revert (§5.6) the anchor moves: genesis's time and target are
+  replaced by the entry's `anchor_time` and the target of block `H + 1`.
 
 Reference points: parano1d (T 30 s, H 180 s, MTP 11, drift 120 s); Bitcoin
 Cash (T 600 s, H 172,800 s).
@@ -717,7 +719,9 @@ chain whose fork point is at or below `tip − FINALITY_DEPTH` is rejected
 outright, however much work it carries, and logged. After one hour a block
 is final for every node that saw it in time. The cost is honest: a partition
 longer than an hour produces two chains that will not rejoin automatically;
-the operator of the minority side resyncs from a checkpoint. For a chain run
+the operator of the minority side resyncs from a checkpoint. A deeper return
+is not a reorganization: it is a revert by release (§5.6), which leaves
+`MAX_REORG` unchanged. For a chain run
 on three known machines plus volunteers this trade is right; it bounds the
 damage of a rented-hash-rate rewrite to one hour of history (§8).
 
@@ -746,6 +750,10 @@ checkpoint signer:
 
 This is centralization, named as such, bounded in power (cannot forge, cannot
 censor, cannot rewrite — only veto deep reorgs) and bounded in time.
+
+The same key also signs revert statements (§5.6, S1) under their own domain
+tag. The sunset above does **not** bind them; that is an open hole, named in
+§5.6 S1, and it makes "bounded in time" true of checkpoints only.
 
 ### 5.4 orphans and ordering
 
@@ -776,6 +784,233 @@ Cheap before expensive, and nothing stateful before PoW:
 A block failing 6–8 marks the header invalid (and every descendant);
 failures at 1–5 never reach disk.
 
+### 5.6 revert by release
+
+**Draft for the owner (D19, 2026-11-02; P9 of the director's plan).** The
+owner: "launch a network with the possibility of a revert — the state is
+public and easy to revert — this has to be built right into the protocol."
+A revert returns the chain to an earlier block `H` and continues from it,
+every node doing the same thing by rule. Two triggers share one machinery
+(the entry, below): the owner's signed **revert statement** — the live path,
+no release needed — and the **compiled table** of a release, the fallback
+that needs no key (D16: a launch whose `checkpoint_key` is all-zero has no
+statements and rests on the table alone).
+
+**The rule.** An *entry* is `(H, keep, vetoed, anchor_time, rule_set)`. The
+compiled table of a release, beside `ACTIVATIONS` (§7.1), carries entries
+directly; a statement becomes an entry (rule S2). Both are enforced
+alike:
+
+```
+REVERTS: [Revert { height: u64,              // H
+                   keep: BlockId,             // id_H — the block the chain returns to
+                   vetoed: [BlockId],          // the old block(s) at H + 1, ≥ 1
+                   anchor_time: u64,           // unix seconds, the release's publish time
+                   rule_set: u16 }]            // the rule set from H + 1 on (§7.1)
+```
+
+compiled into the binary and printed in `/status`. For every entry, whatever
+its source, a node:
+
+1. treats `keep` as a compiled checkpoint: any other block at height `H` is
+   invalid (§5.3's rule, without a key and without a sunset);
+2. treats every id in `vetoed` as invalid, and every descendant of one as
+   invalid by its invalid parent (§5.5), without fetching its body;
+3. re-anchors the difficulty above `H` (§1.5): for `h > H + 1`,
+   `Δt = P.time − anchor_time`, `ideal = (h − H − 2) · T`, `genesis_target`
+   read as `target(bits_{H+1})`, with `bits_{H+1}` given by §1.5 from the
+   parent `H` (the same on both branches, since `H` is shared); and the
+   block at `H + 1` must have `time ≥ anchor_time`. Without this the first
+   block above `H` would carry days of drift, the target would rise to
+   `POW_LIMIT`, and one GPU would re-mine the gap in minutes. It also makes
+   a branch mined from `keep` before the release was published invalid;
+4. requires `version & 0xffff == rule_set` from `H + 1` (§7.1: each entry
+   appends `(rule_set, H + 1)` to the activation table), so a node of an
+   older release sees the new branch's blocks as a rule set it does not
+   know and reports `upgrade-required` instead of silently staying on the
+   old branch (§7.1).
+
+At open, before the replay of §3.6: when the stored main chain contains a
+`vetoed` id, a block other than `keep` at `H`, or (a statement entry, rule
+S2) a block at `H + 1` with `time < anchor_time`, the node marks it and its
+descendants invalid, rolls the
+state back to `H` (the undo journals of §5.2 — every block's journal is
+kept, so any depth is reachable — or a wipe and the existing replay from
+genesis), and replays to `H` with the root checks. From then on the
+runtime path is plain validation: the new branch is the only valid chain
+above `H`, so it is the canonical tip whatever the chainwork of the old
+branch, and `MAX_REORG` (§5.2) never changes and is never bypassed — a
+third branch from `keep` competes with the new branch under ordinary
+proof of work.
+
+Entries refer only to blocks in the past, are sorted by `height`, and are
+checked for consistency at open (a later entry's `keep` must descend from
+every earlier entry's `keep`, and none may descend from an earlier
+`vetoed`); an inconsistent table refuses to start.
+
+**The revert statement** (the owner's trigger):
+
+```
+RevertStatement { version: u8 = 1, chain: [u8;32], height: u64,   // H
+                  keep: BlockId, counter: u64, anchor_time: u64,
+                  sig: NSIG1[102] }                               // 191 bytes, little-endian
+statement = hemera("soft3/chain/revert/v1\0" ‖ version ‖ chain ‖ height ‖ keep ‖ counter ‖ anchor_time)
+subject   = neuron_of(checkpoint_key)
+```
+
+- **S1 key and tag.** The signer is the genesis `checkpoint_key` (§4.1,
+  §4.4); no other key slot exists. The domain tag is the statement's own,
+  never §5.3's `checkpoint/v1`: a checkpoint signature never verifies as a
+  statement and the converse. §5.3's `CHECKPOINT_SUNSET` does **not** bind
+  statements, and `CHECKPOINT_INTERVAL` does not apply. An all-zero key, or
+  `--no-checkpoints`, disables them. *Open hole, named:* the key that §5.3
+  retires after six months keeps this power for the life of the chain, and
+  nothing retires it — a sunset for statements (a genesis field, or a
+  compiled height) is not designed here. Until it is, the key can rewind
+  any depth (S5) and its loss or theft is a chain-level event; the
+  compiled table (above) is the key-free fallback, not a way to take the
+  key's power away.
+- **S2 entry.** A statement is the entry `(H = height, keep, vetoed = [],
+  anchor_time, rule_set = compiled_max + counter)` with `compiled_max` the
+  highest rule set in `ACTIVATIONS` and in the compiled `REVERTS`; `counter`
+  is in `1 ..= 65535 − compiled_max`. `vetoed` is empty: rule 1 vetoes the
+  wrong block at `H`, and rule 3's time floor vetoes the old block at
+  `H + 1` and, by its invalid parent, everything above it. The signer sets
+  `anchor_time ≥ now + MAX_FUTURE_DRIFT + 1` (121 s ahead; `cybernode chain
+  revert-sign` refuses less and defaults to exactly that), so every block
+  any node could have accepted when the statement was signed is older than
+  the floor; the node enforces the floor, not the signer's clock.
+- **S3 composition.** A node holds statements as a set ordered by `counter`.
+  A statement applies only with a counter strictly above the highest held;
+  a lower counter, or an identical statement, is ignored (no state change);
+  an equal counter with other content keeps whichever has the smaller
+  `hemera` of its 191-byte encoding — a signer must never reuse a counter.
+  The effective entries are the held statements replayed in counter order,
+  a statement at `H2` first dropping the earlier statement entries with
+  `height ≥ H2`, then appending itself: a later statement can only return
+  further back, or onward from the entries below it. A statement is
+  refused when `H` is 0 or not above the highest compiled `REVERTS` height,
+  when its counter is 0 or past the range of S2, when `version ≠ 1` or its
+  `chain` is another, when a rehearsal entry (`--revert`) is in the table
+  (a drill and an authority never mix; a node holding statements refuses to
+  start with `--revert`), and when the table with it fails the static or
+  store checks above — in particular a `keep` the store holds at a height
+  other than `H`, which is logged and ignored. A `keep` not yet stored, or a
+  tip below `H`, is not an error: the statement is held on its signature and
+  the entry's rules (1 and 3) judge blocks as they arrive.
+- **S4 persistence.** An accepted statement is appended to
+  `revert-statements` under the chain's home and synced before it applies;
+  at open the file is read before the table is checked against the store,
+  statements that fail S3's checks are skipped with a log line.
+- **S5 live apply.** A newly accepted statement — from gossip, from a
+  `/checkpoints` answer, or submitted (S8) — is persisted and then runs the
+  open-time rollback above on the running node: the same marking, the same
+  cut of the main chain, the state rebuilt from genesis on the shortened
+  chain with the root checks, then fork choice takes the heaviest valid
+  chain left. It works at any depth: `MAX_REORG` (§5.2) is not consulted
+  and is unchanged for every other path. `Event::Reverted` (with
+  `rehearsal: false` and an empty `vetoed`), `reverted.log` and `/status`
+  `reverts` follow as for a table entry; a status entry made by a statement
+  ends with `:statementN`.
+- **S6 mempool.** The transactions of the blocks a statement retracts are
+  **dropped**, not re-admitted (unlike the compiled table, which re-admits
+  them at open): the owner returns the chain, it does not offer the old
+  branch's transactions another try. The mempool is then revalidated on
+  the new tip and anything that no longer applies leaves it.
+- **S7 network.** Statements travel on the `checkpoints` gossip topic as
+  frame `R` and are served in the `k` answer and at `/checkpoints`
+  (chain-wire §2–§3, §7); a node relays one only when it is new to it. A
+  header whose rule set is above any the node knows is never scored; it
+  first triggers a fetch of the sender's checkpoints and statements, and
+  only a header still unexplained afterwards is `upgrade-required` (§7.1).
+- **S8 submission.** `cybernode chain revert-sign` signs offline (the seed
+  is read from its flag as `chain key --seed` does and never stored);
+  `POST /checkpoints/revert` on any node holds, applies and gossips the
+  hex statement.
+
+**What happens to the rest.**
+
+- Transactions of the retracted blocks return to the mempool (compiled
+  table; a statement drops them, S6) in their
+  original block order, coinbases skipped, each re-admitted only if still
+  valid (chain-wire §4); anything invalid is dropped with its dependents,
+  so spends of retracted coinbases cascade out. A transfer valid on both
+  branches is replayed on the new one: anyone who transacted on the old
+  branch above `H` should expect it. A txid exclusion list is a courtesy
+  filter only — the same effect can be re-signed under a new nonce — so
+  when a revert answers an exploit, the same release makes the exploit
+  invalid by the rule set it activates at `H + 1`.
+- The economy: settlement of every epoch whose `settle(E)` lies above `H`
+  is computed again on the new branch (chain-economy §2.5; results are
+  keyed by boundary block ids, so a boundary at or below `H` keeps its
+  result). Whatever acted outside the chain on an old settlement is
+  outside the protocol.
+- The finalized stream (§7.3) is "never reorged, except by `Reverted`": the
+  node persists `Event::Reverted { to_height: H, keep, vetoed, table }` in
+  the stream at its own cursor, delivered before any finalized block above
+  `H`; an indexer without its own undo resyncs from genesis. `/status`
+  carries `reverts` (the table) and the last `Reverted`.
+- Wallets and explorers learn of it from `/status` and `/v2/history`
+  (which carries the `Reverted` record), and from the launch page that
+  announces the release, as for every scheduled fork.
+- Peers of an older release keep offering vetoed blocks: they are not
+  scored for it (chain-wire §5), and a vetoed id is remembered so it is
+  never requested again.
+
+**Who triggers, and what that means.** For a statement the authority is the
+owner key (S1), named as the centralization it is — bounded only by the
+rules above: it cannot forge a block or a transaction, it can return the
+chain to any block already in it and set the difficulty and rule set from
+there. For the compiled table the release is the authority — the same
+authority that schedules every fork (§7.1, flag day, nothing on chain
+votes). A table revert happens on the nodes that run the release; while the one
+GPU is the majority miner (§8) an entry is in effect a request to one
+operator, and an old-release miner keeps an old branch alive that new
+nodes treat as invalid. This is stated, not hidden: it is true of every
+flag day on this chain.
+
+**Depth** is not bounded in code: a bound would sit in the same compiled
+table and be changed by the same release, so it would protect nothing; a
+statement is not bounded either (S5).
+Storage reaches any depth (journals are never pruned; open replays from
+genesis). What depth costs is policy — the epochs settled again and the
+indexers that resync.
+
+**Rehearsal.** `--revert <height>:<keep>:<vetoed>[,…]:<anchor_time>` adds an
+entry at runtime for a drill. A node so started marks `/status` and every
+`Reverted` with `rehearsal: true` and refuses to start on a chain whose
+id is a compiled production id (pussy's or bostrom's, §4.4), so a drill
+never feeds a real indexer. Rehearsal entries and statements never mix (S3).
+
+**The options weighed** (the plan's P9 asked for three):
+
+| option | who triggers | why not / why |
+|---|---|---|
+| (a) miner signal bits (`version >> 16`) over a window, threshold of blocks | proof of work | rejected: the signals are written by the miner, and while one GPU is the majority (§8) it alone could revert to any depth — the rewrite §5.2 bounds to one hour. Its one honest use, holding upgraded nodes on the old branch until the miner is ready, buys nothing: the miner already holds that veto by not upgrading, and upgraded nodes would finalize blocks they then revert |
+| (b) a revert table in the release, as above | the release, as for every fork | **kept as the fallback**: no key, no header change, `MAX_REORG` unchanged, reuses the checkpoint, veto, undo and replay machinery the node already has |
+| (d) the owner's revert statement (S1–S8) | the `checkpoint_key` holder, offline, no release | **the live trigger** (owner's design): the same entry and the same rollback as (b), delivered by gossip in minutes; its price is the key's standing power (S1, open hole) |
+| (c) an `era` counter in the header, era e + 1 outranking era e at any depth | whoever writes the header — the miner | rejected: the era is written by the miner, so it is (a) with no threshold and no depth bound; and it is a header change (§1.1 is frozen at 168 bytes) that (b) does not need |
+
+**Cost.** Code paths, not yet timed: a revert of depth `d` costs `d`
+undo-journal applications (one per block, the journal of the block's
+writes) or, by the wipe path, one replay from genesis — `O(changes ·
+log n)` hemera compressions per block (§3.3), the same work the node does
+at every restart; plus every settlement above `H` once more (chain-economy
+§10's budget). The per-block undo and replay times, measured on the build
+service, are part of the implementation's acceptance, not of this page.
+
+**Acceptance.** A test that mines a chain on two nodes, applies one entry
+by rule and gets both on the same tip above `H` with the old branch
+invalid; for statements: one signed by the genesis key is accepted and any
+other, or a checkpoint signature, refused; a lower or equal counter is
+ignored; two nodes rewind by delivery and end on one tip above `H`; a revert
+deeper than `MAX_REORG` applies; a higher counter at a lower height drops
+the earlier entry; a node reopened after a statement keeps the reverted
+chain; the encoding round-trips; a test that an old-release node reports `upgrade-required` on the
+new branch; a revert rehearsed on the alpha network (`pussy-rc`, two
+nodes) with both on one tip after it. The genesis release carries the
+machinery with an empty table.
+
 ## 6. network
 
 Node-to-node transport, gossip topics, header-first sync, discovery through
@@ -804,6 +1039,15 @@ table, announced on cyber/launch at least 40,320 blocks (two weeks) before
 the height. Nothing on chain votes; this is the flag-day model, chosen
 because the chain has no governance object and because every node in the
 first months is run by someone reading the launch page.
+
+A block with valid proof of work whose `version & 0xffff` is a rule set
+the node does not know, or is above the last rule set of its table, is
+rejected and not relayed; the node sets `upgrade-required: true` in
+`/status` with the height and the rule set seen, and keeps its tip. This is
+how a node of an older release learns of a revert (§5.6), whose entry
+always starts a rule set at `H + 1`. Rule-set numbers are therefore
+assigned in activation order; the pool (§11) is "rule set 2" only if no
+revert comes before it (open question 13, §10).
 
 `version >> 16` are miner signal bits: a miner may set them to advertise
 readiness for a rule set; they are informational, never consensus.
@@ -844,7 +1088,9 @@ interface, the finalized block stream:
   carry the block id, height and state root of every operation; and
 - the local event bus of the node process (`chain::Event::Block { header,
   body, state_root }`, emitted once a block is `FINALITY_DEPTH` deep —
-  shadow indexers never see a reorg).
+  shadow indexers never see a reorg; the one exception is a revert by
+  release, §5.6, delivered in the stream as `Event::Reverted` before any
+  block above its height).
 
 What each reads and publishes:
 
@@ -890,6 +1136,7 @@ What is and is not protected at launch, stated plainly.
 | 51 % rewrite of recent history | not protected by work alone — hash rate at launch is tiny; bounded to one hour by `FINALITY_DEPTH` and, for six months, by checkpoints |
 | censorship by a majority miner | not protected (no protocol can); visible in `/status` (miner distribution) |
 | long-range attack from genesis | protected by the pinned genesis id, the reorg limit and checkpoints |
+| a bad state that the chain must leave (bug, exploit, wrong settlement) | a revert by release (§5.6): the release names `H`, the node returns to it by rule, no key; it happens on the nodes that run the release |
 | eclipse | basics only (chain-wire §5); a determined adversary controlling a node's peers can feed it a lighter chain until it reconnects |
 | timestamp manipulation | bounded to 1.149× per attacker block (§1.5) |
 | spam | fee floor, size caps, per-peer limits; no fee market, so sustained spam at 1 unit/byte is cheap for a whale and fills blocks — accepted on a canary |
@@ -1014,6 +1261,8 @@ kernel's `TxError::Box` goes.
 | 10 | `NeuronRecord.nonce` in bbg vs chain-side nonce table outside the root | in bbg, under the root | in bbg, kept |
 | 11 | multisig / non-secp256k1 legacy accounts | dormant; a later rule set adds their claim | dormant, kept |
 | 12 | the particle definition (row 19) | `hemera(bytes)`, 32 bytes, as every crate computes today | `hemera(bytes)`, kept |
+| 13 | revert (§5.6, D19): by release table (b), miner signals (a), or a header era (c); and whether every revert starts a rule set at `H + 1`, which numbers rule sets by activation order instead of fixing the pool as rule set 2 (§11.11) | (b), each entry starting a rule set; the pool is "the rule set that carries its verifying keys", whatever its number | open — the owner's hand (D6); the owner's design adds the signed statement (d) as the live trigger, the table staying the fallback |
+| 14 | the revert statement's key (§5.6 S1): a statement is signed by the genesis `checkpoint_key` and the §5.3 sunset does not bind it | the checkpoint key, no sunset; all-zero key disables statements | owner's design (D19); retiring the key's statement power is an open hole |
 
 ## 11. the pool (rule set 2, formats frozen at genesis)
 
