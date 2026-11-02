@@ -41,7 +41,6 @@ Topic ids are 32 bytes, `hemera("soft3/chain/topic/v1\0" ‖ chain ‖ name)`:
 | `headers` | `H` | one 168-byte header | 168 B | the miner of a new block; every node that validated it (steps 1–5) relays |
 | `txs` | `T` | one transaction (§2 of chain.md) | 512 B | the submitter; every node that admitted it to its mempool relays |
 | `checkpoints` | `C` | `height: u64 ‖ block_id: [32] ‖ sig: NSIG1[102]` | 142 B | the checkpoint signer; relayed after signature check |
-| `checkpoints` | `R` | `version: u8 ‖ chain: [32] ‖ height: u64 ‖ keep: [32] ‖ counter: u64 ‖ anchor_time: u64 ‖ sig: NSIG1[102]` | 191 B | the owner's revert statement (chain.md §5.6), signed offline by the checkpoint key and submitted at any node; relayed only when new to the relaying node, after its signature check |
 | `shadow/<core>` | `X` | core-defined bytes | 4,096 B | shadow indexers (chain.md §7.3); never consensus |
 
 Rules:
@@ -53,10 +52,8 @@ Rules:
   not, and pushing bodies to peers that have not checked the PoW is the
   header-first rule broken;
 - gossip relay happens only after local validation: a header after PoW, a
-  transaction after mempool admission, a checkpoint or a revert statement
-  after its signature; an invalid message is dropped and scored (§5), a
-  revert statement a node cannot use (disabled, a counter not above the
-  highest held, inconsistent with its store) is logged and not scored;
+  transaction after mempool admission, a checkpoint after its signature;
+  an invalid message is dropped and scored (§5);
 - the iroh-gossip `max_message_size` is set to 4,096 on every topic; larger
   frames are a protocol error.
 
@@ -78,7 +75,6 @@ One request per stream; a peer may keep up to 8 streams open per direction.
 | `T` | resp | tx bytes | one per frame |
 | `k` | req | `from_height: u64` | get-checkpoints at or above a height |
 | `C` | resp | checkpoint (as in §2) | one per frame |
-| `R` | resp | revert statement (as in §2) | one per frame, all held statements by ascending counter after the checkpoints, whatever `from_height`; a peer of an older release that cannot decode `R` fails the answer, so this frame is part of the revision that adds chain.md §5.6 statements |
 | `e` | resp | empty | end of response |
 | `x` | resp | `code: u8 ‖ utf8 reason` | error; codes: 1 unknown, 2 pruned, 3 limit, 4 wrong chain |
 
@@ -93,8 +89,7 @@ parent:
 1. exchange `s`; disconnect on chain or genesis mismatch; on a new
    connection also send `k` from our highest held checkpoint (a node that
    just started holds none and would otherwise follow a rewrite deeper than
-   `MAX_REORG` until the next checkpoint is signed; the answer also carries
-   the peer's revert statements `R`, chain.md §5.6); if the peer's
+   `MAX_REORG` until the next checkpoint is signed); if the peer's
    `chainwork` is not greater than ours and its tip is known, stop;
 2. `g` with our locator; validate every returned header through steps 1–5
    of chain.md §5.5 against our header store; repeat `g` from the last
@@ -104,15 +99,7 @@ parent:
    when the chainwork rule says so (chain.md §5.1–5.2);
 4. headers on a chain whose fork point is deeper than `MAX_REORG` are
    stored (they are valid headers) but no bodies are requested; the event
-   is logged as a rejected deep fork;
-5. a header that is, or descends from, a `vetoed` id of the revert table
-   (chain.md §5.6) is invalid and never has its body requested; a header
-   whose rule set the node does not know is never scored: it first makes the
-   node send `k` to that peer (at most once per response from sync, once per
-   two minutes per peer from gossip) — the peer may be past a revert
-   statement we have not heard (chain.md §5.6) — and the header is judged
-   again; only if it is still unknown does it set `upgrade-required`
-   (chain.md §7.1).
+   is logged as a rejected deep fork.
 
 ### 3.2 initial block download
 
@@ -167,9 +154,7 @@ over size; +10 for an invalid signature, a non-canonical encoding, a header
 failing the time rule by more than 1 h; +1 for a duplicate; score decays by
 1 per minute; ≥ 100 bans the endpoint id
 for 1 h. Nothing is ever charged for a header that fails only the
-future-drift rule within the hold window, for a header vetoed by the revert
-table or descending from one, or for a header of an unknown rule set
-(a peer of another release is not an attacker, chain.md §5.6), nor for a relayed transaction
+future-drift rule within the hold window, nor for a relayed transaction
 whose nonce is outside the window (below it: already mined; above it: the
 relay holds blocks we lack — a busy account fills its window every block)
 or whose sender cannot fund it: each costs one signature check, bounded by
@@ -239,8 +224,7 @@ The existing adapter (native-node.md: bounds, request identity, error codes
 | `GET /balances/{owner}` | every token of an owner | new |
 | `GET /mempool` | txids and byte total | new |
 | `GET /peers` | per peer: endpoint id, direction, best header, score | new |
-| `GET /checkpoints` | the checkpoints held and, under `reverts`, the revert statements held (height, keep, counter, anchor_time, sig, and the 191-byte `statement` hex) | new; `reverts` added with chain.md §5.6 |
-| `POST /checkpoints/revert` | a revert statement: hex, raw bytes, or JSON `{"statement": "hex"}` | verified, persisted, applied and gossiped; `{"accepted": true, "new": bool, "statements": N}`, or `422` with the reason (bad signature, disabled, inconsistent, a rehearsal in force); `new: false` when it changes nothing, and it is announced again all the same |
+| `GET /checkpoints` | the checkpoints held | new |
 | `GET /epoch/{E}`, `GET /epochs?after=E&limit=N` | epoch records and payout lists | new, chain-economy §11 |
 | `GET /focus/{particle}`, `GET /focus?top=N` | φ* of the last settled epoch | new, chain-economy §11 |
 | `GET /card/{id}`, `GET /cards/{neuron}` | positions and their stake | new, chain-economy §11 |
@@ -311,12 +295,7 @@ soft3/chain/1`, `rule-set`, `activations`, `engine: chain+cybergraph+bbg`,
 signs for), `genesis-block` (block 0's id), `genesis-time`, `bbg-root`,
 `supply`, `conserved: true|false`, `subsidy`, `neurons`, `particles`,
 `axons`, `mempool`, `peers`, `outbound`, `checkpoint`, `finalized`,
-`catching-up`, `reverts` (the effective revert table, chain.md §5.6: the
-compiled entries and the owner's statements, the latter ending `:statementN`),
-`reverted` (the last `Reverted`: height, kept id, vetoed ids, and
-`rehearsal: true` when it came from `--revert`), `upgrade-required:
-true|false` (with the height and rule set seen, chain.md §7.1),
-`mining: true|false` (a miner took a `/template` within the
+`catching-up`, `mining: true|false` (a miner took a `/template` within the
 last 60 s; the node itself never mines), `storage: bbg-fjall`. true-cyber's sync probe reads `height`, `tip`, `catching-up` and
 `chain`, nothing else, so a chain node answers an unchanged client.
 
