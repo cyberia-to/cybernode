@@ -25,7 +25,9 @@ ulimit -n 65536 2>/dev/null || echo "run-node: could not raise nofile to 65536 (
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 check="${SOFT3_CHECK:-$(command -v cybernode-check || true)}"
-[[ -n "$check" ]] || check="$here/../cybernode-check"
+if [[ -z "$check" ]]; then
+  if [[ -f "$here/cybernode-check" ]]; then check="$here/cybernode-check"; else check="$here/../cybernode-check"; fi
+fi
 bin="$root/bin/cybernode"
 [[ -x "$bin" ]] || { echo "run-node: $bin is not executable" >&2; exit 2; }
 

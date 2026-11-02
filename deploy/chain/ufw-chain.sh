@@ -21,7 +21,7 @@ comment="cybernode-$chain-radio"
 log="/var/log/cybernode/ufw.log"
 mkdir -p "$(dirname "$log")"
 
-present() { ufw status | grep -qE "^$port/udp\s+ALLOW IN\s+Anywhere" ; }
+present() { ufw status | grep -qE "^$port/udp\s+ALLOW(\s+IN)?\s+Anywhere" ; }
 
 case "$action" in
   show)

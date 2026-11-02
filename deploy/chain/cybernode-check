@@ -383,7 +383,7 @@ fi
 
 udp_bound() { # port -> 0 when a UDP socket listens on it
   if command -v ss >/dev/null 2>&1; then
-    ss -uln 2>/dev/null | awk '{print $5}' | grep -qE "[:.]$1$"
+    ss -uln 2>/dev/null | awk -v p="$1" '{for(i=1;i<=NF;i++) if($i ~ "[:.]" p "$") {f=1}} END{exit !f}'
   else
     local hex
     hex=$(printf '%04X' "$1")
