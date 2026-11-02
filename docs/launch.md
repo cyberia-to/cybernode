@@ -32,7 +32,7 @@ cosmos **space-pussy** / **bostrom** on the apparatus hosts are bootloader chain
 
 ```bash
 rustup update stable       # need rustc ≥ 1.85 (edition 2024 deps)
-cargo install --git https://github.com/cyberia-to/cybernode cybernode    # operator / node (or: cargo install --path rs); the crates.io name is not published yet
+cargo install --git https://github.com/cyberia-to/cybernode cybernode --branch release/phase1 --locked    # operator / node (or: cargo install --path rs); the crates.io name is not published yet, so never an unpinned install
 cargo install true-cyber   # product face (thin client)
 ```
 
@@ -96,12 +96,12 @@ host: **cyberproxy** (edge for cyb.ai).
 
 ```bash
 # on an operator machine
-cargo install --git https://github.com/cyberia-to/cybernode cybernode --force
+cargo install --git https://github.com/cyberia-to/cybernode cybernode --rev <the phase-1 pin of cybernode> --force --locked
 
 # on cyberproxy
 ssh cyberproxy
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --git https://github.com/cyberia-to/cybernode cybernode --force
+cargo install --git https://github.com/cyberia-to/cybernode cybernode --rev <the phase-1 pin of cybernode> --force --locked
 ```
 
 the unit is `deploy/chain/cybernode@.service`, one instance per network
@@ -135,7 +135,7 @@ cyber sync
 redeploy after a cybernode upgrade:
 
 ```bash
-ssh cyberproxy 'export PATH=$HOME/.cargo/bin:$PATH; cargo install --git https://github.com/cyberia-to/cybernode cybernode --force; sudo systemctl restart cybernode@pussy'
+ssh cyberproxy 'export PATH=$HOME/.cargo/bin:$PATH; cargo install --git https://github.com/cyberia-to/cybernode cybernode --rev <the phase-1 pin of cybernode> --force --locked; sudo systemctl restart cybernode@pussy'
 ```
 
 ## multi-node (current limits)
