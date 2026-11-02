@@ -69,7 +69,7 @@ on the running hosts; only what an operator reads and types says cybernode.
 
 cyberproxy as below. agent-a: see the variant after step 8.
 
-1. Binary: `cargo install cybernode --version <phase-1 release> --locked` as `cyber`
+1. Binary: `cargo install --git https://github.com/cyberia-to/cybernode cybernode --rev <the phase-1 pin> --locked` as `cyber` (the crates.io name is not published yet; never install an unpinned, unpublished name)
    (or copy the release binary to `/home/cyber/.cargo/bin/cybernode`). Confirm
    `cybernode node --help` lists `--chain --radio --peers`; the unit will not work
    with the 0.10.0 flag set.

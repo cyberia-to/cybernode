@@ -6,7 +6,7 @@ const HOST = "cyberproxy"
 
 def main [] {
     print $"deploying cybernode → ($HOST)"
-    ^ssh $HOST 'export PATH=$HOME/.cargo/bin:$PATH; cargo install cybernode --force'
+    ^ssh $HOST 'export PATH=$HOME/.cargo/bin:$PATH; cargo install --git https://github.com/cyberia-to/cybernode --rev $REV cybernode --force'
     ^scp "deploy/spacepussy-test.service" $"($HOST):/tmp/spacepussy-test.service"
     ^ssh $HOST 'sudo cp /tmp/spacepussy-test.service /etc/systemd/system/spacepussy-test.service'
     ^ssh $HOST 'sudo systemctl daemon-reload && sudo systemctl enable --now spacepussy-test && sudo systemctl restart spacepussy-test'
