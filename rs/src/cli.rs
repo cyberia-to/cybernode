@@ -269,7 +269,7 @@ fn cmd_node(args: &[String]) {
         println!("             [--corpus DIR]   # record every block given, with its verdict and state root (blocks.jsonl)");
         println!("             (mining is `cybernode mine --node http://BIND --address NEURON`: /template + /submit)");
         println!("  cybernode node id --home DIR      # radio endpoint id (64 hex) for peers.toml");
-    println!("  cybernode genesis build --chain pussy|bostrom --snapshot DIR --out FILE");
+    println!("  cybernode genesis build --chain pussy|bostrom|pussy-rc --snapshot DIR --out FILE");
     println!("                      [--cache DIR] [--export DIR] [--no-root] [--time UNIX]");
     println!("  cybernode genesis verify FILE [--root]");
     println!("  cybernode conformance bless|check chain [--genesis FILE]");
@@ -529,6 +529,9 @@ fn cmd_chain(args: &[String]) {
         Some("genesis-dev") => {
             let name = flags.get("name").cloned().unwrap_or_else(|| "dev".into());
             if node::chain_node::LAUNCH_CHAINS.contains(&name.as_str()) {
+                if name == "pussy-rc" {
+                    die("`pussy-rc` is a launch chain; its genesis comes from `cybernode genesis build --chain pussy-rc --time T`".into());
+                }
                 die(format!("`{name}` is a launch chain; its genesis comes from `cybernode genesis build`"));
             }
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -655,7 +658,7 @@ fn print_help() {
     println!("  cybernode node --chain <pussy|bostrom|dev> --home DIR --bind HOST:PORT --radio HOST:UDP --peers FILE --moniker NAME");
     println!("  cybernode node id --home DIR");
     println!("  cybernode chain genesis-dev|key|tx …   # dev helpers");
-    println!("  cybernode genesis build --chain pussy|bostrom --snapshot DIR --out FILE");
+    println!("  cybernode genesis build --chain pussy|bostrom|pussy-rc --snapshot DIR --out FILE");
     println!("                      [--cache DIR] [--export DIR] [--no-root] [--time UNIX]");
     println!("  cybernode genesis verify FILE [--root]");
     println!("  soft3 manifesto");
@@ -903,16 +906,33 @@ fn cmd_conformance(args: &[String]) {
         std::process::exit(2);
     }
     let value = |flag: &str| -> Option<String> { args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned() };
-    let snap = value("--snap").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../conformance/chain.snap")));
+    let snap = value("--snap").map(PathBuf::from).unwrap_or_else(conformance::chain_snap_path);
     let genesis = value("--genesis").map(PathBuf::from).unwrap_or_else(|| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         PathBuf::from(home).join(".cache/cyber/genesis/pussy.tade")
     });
     let committed = std::fs::read_to_string(&snap).map(|s| conformance::parse(&s)).unwrap_or_default();
     let mut current = conformance::entries();
+    let mut pins_ok = true;
     match std::fs::read(&genesis) {
         Ok(bytes) => match conformance::genesis_entries("pussy", &bytes) {
-            Ok(e) => current.extend(e),
+            Ok(e) => {
+                // the binary's pins must equal the file the gate built from the burial
+                if let Some(pin) = crate::chain::params::embedded("pussy").filter(|c| c.pinned()) {
+                    for (scenario, pinned) in [("pussy particle", pin.chain_id), ("pussy block0_id", pin.genesis_block)] {
+                        let file = e.iter().find(|x| x.scenario == scenario).map(|x| x.value);
+                        if file != Some(pinned) {
+                            let file = file.map(|v| crate::wallet::hex(&v)).unwrap_or_else(|| "(absent)".into());
+                            eprintln!("pins: {scenario} is {} in this build but {file} in {}", crate::wallet::hex(&pinned), genesis.display());
+                            pins_ok = false;
+                        }
+                    }
+                    if pins_ok {
+                        println!("pins: pussy particle and block0_id match this build");
+                    }
+                }
+                current.extend(e);
+            }
             Err(e) => {
                 eprintln!("conformance: {} is not a genesis: {e}", genesis.display());
                 std::process::exit(1);
@@ -927,6 +947,10 @@ fn cmd_conformance(args: &[String]) {
     }
     match sub {
         "check" => {
+            if !pins_ok {
+                eprintln!("chain.snap: the pins in rs/src/chain/params.rs do not match the genesis file");
+                std::process::exit(1);
+            }
             if drift.is_empty() {
                 println!("chain.snap: {} entries, no drift", current.len());
             } else {
@@ -973,7 +997,7 @@ fn cmd_genesis(args: &[String]) {
     match sub {
         "build" => {
             let Some(chain) = value("--chain").and_then(|c| Chain::parse(&c)) else {
-                eprintln!("genesis build: --chain pussy|bostrom is required");
+                eprintln!("genesis build: --chain pussy|bostrom|pussy-rc is required");
                 std::process::exit(2);
             };
             let Some(snapshot) = value("--snapshot") else {
@@ -1061,7 +1085,7 @@ fn cmd_genesis(args: &[String]) {
             }
         }
         _ => {
-            eprintln!("usage: cybernode genesis build --chain pussy|bostrom --snapshot DIR --out FILE [--cache DIR] [--export DIR] [--no-root] [--time UNIX]");
+            eprintln!("usage: cybernode genesis build --chain pussy|bostrom|pussy-rc --snapshot DIR --out FILE [--cache DIR] [--export DIR] [--no-root] [--time UNIX]");
             eprintln!("       cybernode genesis verify FILE [--root]");
             std::process::exit(2);
         }
