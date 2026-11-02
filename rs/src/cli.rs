@@ -638,7 +638,7 @@ fn hostname_fallback() -> String {
 fn hostname_fallback_from<F: Fn(&str) -> Result<String, std::env::VarError>>(get: F) -> String {
     get("HOSTNAME")
         .or_else(|_| get("HOST"))
-        .unwrap_or_else(|_| "soft3-node".into())
+        .unwrap_or_else(|_| "cybernode".into())
 }
 
 fn print_network(n: Network) {
@@ -683,10 +683,10 @@ fn print_help() {
     println!("  cybernode genesis build --chain pussy|bostrom|pussy-rc --snapshot DIR --out FILE");
     println!("                      [--cache DIR] [--export DIR] [--no-root] [--time UNIX]");
     println!("  cybernode genesis verify FILE [--root]");
-    println!("  soft3 manifesto");
-    println!("  soft3 version");
+    println!("  cybernode manifesto");
+    println!("  cybernode version");
     println!();
-    println!("not soft3 networks (cosmos bootloader on cybernode):");
+    println!("not soft3 networks (cosmos bootloader on apparatus hosts):");
     println!("  space-pussy · bostrom");
     println!();
     println!("docs  https://cyber.page/soft3/docs/launch");
@@ -887,7 +887,7 @@ mod tests {
     #[test]
     fn hostname_fallback_defaults_when_neither_env_is_set() {
         let got = hostname_fallback_from(|_: &str| Err(std::env::VarError::NotPresent));
-        assert_eq!(got, "soft3-node");
+        assert_eq!(got, "cybernode");
     }
 
     fn v(items: &[&str]) -> Vec<String> {

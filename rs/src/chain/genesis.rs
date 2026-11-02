@@ -196,7 +196,7 @@ pub(crate) mod tests {
     }
 
     /// chain-conformance §10 against the real pussy file when it is cached
-    /// (`soft3 genesis build` writes ~/.cache/cyber/genesis/pussy.tade);
+    /// (`cybernode genesis build` writes ~/.cache/cyber/genesis/pussy.tade);
     /// the release gate `stack-chain-genesis` runs the same comparison.
     #[test]
     fn pussy_genesis_matches_the_blessed_vectors_when_cached() {

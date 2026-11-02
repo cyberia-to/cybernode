@@ -958,7 +958,7 @@ audit/epoch-settlement-2026-10.md §6).
 
 | owner | change |
 |---|---|
-| soft3 `crate/src/chain` | `params.rs` (§0); `tx.rs` kinds 6, 7 and kind 2 with stake; `apply.rs` coinbase split, settlement step, conservation; `state.rs` card, stake-key and pool operations journaled for reorgs; new `economy/` (`epoch.rs` boundaries and snapshots, `weights.rs` genesis weights and §4.2, `settle.rs` §5 over tru, `emission.rs` §6); `api.rs` §11; `wallet/tx.rs` builders for kinds 6, 7 |
+| cybernode `rs/src/chain` | `params.rs` (§0); `tx.rs` kinds 6, 7 and kind 2 with stake; `apply.rs` coinbase split, settlement step, conservation; `state.rs` card, stake-key and pool operations journaled for reorgs; new `economy/` (`epoch.rs` boundaries and snapshots, `weights.rs` genesis weights and §4.2, `settle.rs` §5 over tru, `emission.rs` §6); `api.rs` §11; `wallet/tx.rs` builders for kinds 6, 7 |
 | bbg | `CardRecord` + `author`, `valence`, `since`; `DIMENSION_VERSION` 4; genesis roots re-blessed |
 | tru | the epoch entry point `tru::focusing::epoch` (tru/specs/epoch.md): `phi` (canonical input §4.3, `PHI_STEPS`, cold start, 2⁻⁶⁰, J, the digest preimage), `path_gradient` (§5.1, `ATTR_NODES`, the ground of §4.4), `net_axons`, thread-count independent; tru/specs owns the operator transposes and the scale of the gradient (2^112 nats per weight unit) — tru#40 (1ea853e) and tru#41 (e660d1e, the ground and the path gradient) |
 | foculus | `phi.rs` and the VDF beacon retired from the root chain; specs/epoch.md superseded for the root chain by §2 here |
