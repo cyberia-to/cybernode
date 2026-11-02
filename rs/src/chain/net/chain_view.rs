@@ -35,10 +35,12 @@ pub enum HeaderError {
     BadTarget,
     BadPow,
     InvalidParent,
+    /// A rule set this node does not know (chain.md §7.1): never scored.
     UnknownRuleSet,
-    /// A fork beyond `MAX_REORG` or one that excludes a held checkpoint
-    /// (chain.md §5.2–5.3): logged, never scored — an honest peer on a
-    /// stale branch sends these.
+    /// A fork beyond `MAX_REORG`, one that excludes a held checkpoint
+    /// (chain.md §5.2–5.3), or a header vetoed by the revert table or
+    /// descending from one (§5.6): logged, never scored — an honest peer on
+    /// a stale branch sends these.
     Refused(String),
     /// The local store failed: our problem, not the peer's.
     Store(String),
@@ -50,8 +52,9 @@ impl HeaderError {
         match self {
             HeaderError::BadPow | HeaderError::WrongChain => 100,
             HeaderError::Syntax(_) | HeaderError::BadBits | HeaderError::BadTime | HeaderError::BadTarget => 10,
-            HeaderError::BadParent | HeaderError::InvalidParent | HeaderError::UnknownRuleSet => 10,
-            HeaderError::Refused(_) | HeaderError::Store(_) => 0,
+            HeaderError::BadParent | HeaderError::InvalidParent => 10,
+            // a peer of another release is not an attacker (chain-wire §5, chain.md §5.6)
+            HeaderError::UnknownRuleSet | HeaderError::Refused(_) | HeaderError::Store(_) => 0,
         }
     }
 }

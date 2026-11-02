@@ -13,15 +13,16 @@ use std::sync::Arc;
 use super::api::{BlockVerdict, ChainError, Event};
 use super::apply::{self, Decoded, Locked, Rules};
 use super::bbg_state::BbgBacked;
-use super::daa::{median_time_past, next_bits};
+use super::daa::{median_time_past, next_bits, next_bits_reverted};
 use super::economy::focus::{FocusEngine, Tru};
 use super::economy::run::Economy;
 use super::economy::settle::SettleResult;
 use super::economy::weights::GenesisWeights;
 use super::genesis::Genesis;
-use super::header::{BlockId, Header};
-use super::params::{COINBASE_MATURITY, EpochClock, FINALITY_DEPTH, MAX_FUTURE_DRIFT, MTP_WINDOW, RULE_SET, rule_set_at};
+use super::header::{BlockId, Header, HeaderError, decode_bits};
+use super::params::{CHAINS, COINBASE_MATURITY, EpochClock, FINALITY_DEPTH, MAX_FUTURE_DRIFT, MTP_WINDOW, RULE_SET};
 use super::pow::{chainwork, valid_pow};
+use super::revert::{self, RevertEntry, RevertTable, Reverted};
 use super::select::{self, Checkpoints};
 use super::state::{Id, StateBackend};
 use super::store::{self, Store};
@@ -29,6 +30,9 @@ use super::tx::Body;
 use super::u256::U256;
 
 const REJECTED_CAPACITY: usize = 4_096;
+
+/// The log of applied reverts under the chain's home (§5.6).
+const REVERTED_LOG: &str = "reverted.log";
 
 pub struct Chain {
     pub(super) genesis: Genesis,
@@ -51,6 +55,21 @@ pub struct Chain {
     pub(super) events: Vec<Event>,
     /// the focus economy's snapshots, settlement workers and outcomes
     pub(super) economy: Economy,
+    /// the effective revert table (§5.6): compiled plus rehearsal entries
+    pub(super) reverts: RevertTable,
+    /// ids invalid by the revert table: the vetoed ids, the blocks marked at
+    /// open (a wrong block at `H`, descendants of a vetoed id). Unlike
+    /// `vetoed` it is never cleared, and a header that is, or descends from,
+    /// one is refused without a score (chain-wire §5)
+    pub(super) revert_vetoed: HashSet<BlockId>,
+    /// `(height, rule_set)` of the last block with valid proof of work whose
+    /// rule set this node does not know (§7.1)
+    pub(super) upgrade_required: Option<(u64, u16)>,
+    /// the last revert applied (persisted in `home/reverted.log`)
+    pub(super) reverted: Option<Reverted>,
+    /// transactions of the main-chain blocks a revert retracted at open, in
+    /// original block order, coinbases skipped; taken by the mempool
+    pub(super) retracted_txs: Vec<Vec<u8>>,
 }
 
 /// The launch chains: they run the spec's epoch clock and nothing else.
@@ -69,6 +88,9 @@ pub struct OpenOptions {
     pub quadrature: usize,
     /// compute settlements inline instead of on worker threads
     pub inline_settlement: bool,
+    /// rehearsal revert entries (`--revert`, §5.6), added to the compiled
+    /// table; refused on a production chain
+    pub reverts: Vec<RevertEntry>,
 }
 
 impl Chain {
@@ -86,6 +108,14 @@ impl Chain {
             Some(c) if !launch && c.valid() => c,
             _ => EpochClock::SPEC,
         };
+        let reverts = RevertTable::effective(opts.reverts.clone());
+        if reverts.any_rehearsal() && (launch || CHAINS.iter().any(|c| c.pinned() && c.chain_id == genesis.chain_id)) {
+            return Err(ChainError::Store(format!(
+                "--revert is a rehearsal and this chain ({}) is a production chain: a drill must never feed a real indexer",
+                genesis.params().name
+            )));
+        }
+        reverts.check_static().map_err(|e| ChainError::Store(format!("revert table: {e}")))?;
         let rules = Rules {
             chain: genesis.chain_id,
             native: genesis.native_token(),
@@ -126,11 +156,86 @@ impl Chain {
             finalized: 0,
             events: Vec::new(),
             economy,
+            reverts,
+            revert_vetoed: HashSet::new(),
+            upgrade_required: None,
+            reverted: revert::load_last(&home.join(REVERTED_LOG)),
+            retracted_txs: Vec::new(),
         };
+        chain.reverts.check_store(&chain.store).map_err(|e| ChainError::Store(format!("revert table: {e}")))?;
+        chain.apply_reverts(home)?;
         chain.replay()?;
         chain.heaviest = chain.store.iter().filter(|(_, e)| e.status != store::Status::Invalid).map(|(_, e)| e.chainwork).max().unwrap_or(U256::ZERO);
         chain.finalized = chain.store.tip_height().saturating_sub(FINALITY_DEPTH);
         Ok(chain)
+    }
+
+    /// Open-time rollback of revert by release (§5.6), before the replay.
+    ///
+    /// The vetoed ids become permanently invalid; every stored block that is
+    /// a vetoed id, a descendant of a block already marked, or any block
+    /// other than `keep` at height `H` is marked invalid (side branches
+    /// included). When that touches the stored main chain, the main chain is
+    /// cut below its lowest invalid block. The state is not persisted — it is
+    /// rebuilt from genesis by `replay()` right after, on the shortened main
+    /// chain, with the stored-root checks — so there is nothing to undo: the
+    /// undo journals are not needed and are left in place. Transactions of
+    /// the retracted blocks (original order, coinbases skipped) are kept for
+    /// the mempool, and one `Reverted` per triggered entry goes to the event
+    /// stream (and the log) before any block event can exist.
+    fn apply_reverts(&mut self, home: &Path) -> Result<(), ChainError> {
+        if self.reverts.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<BlockId> = self.reverts.vetoed_ids().copied().collect();
+        self.revert_vetoed.extend(ids);
+        let tip = self.store.tip_height();
+        let triggered: Vec<Reverted> = self
+            .reverts
+            .entries()
+            .iter()
+            .filter(|e| {
+                e.vetoed.iter().any(|v| self.store.on_main(v)) || (tip >= e.height && self.store.main_at(e.height).is_some_and(|id| id != e.keep))
+            })
+            .map(|e| Reverted { to_height: e.height, keep: e.keep, vetoed: e.vetoed.clone(), rehearsal: e.rehearsal })
+            .collect();
+        let min_height = self.reverts.entries().iter().map(|e| e.height).min().unwrap_or(0);
+        let mut candidates: Vec<(u64, BlockId)> =
+            self.store.iter().filter(|(_, e)| e.header.height >= min_height).map(|(id, e)| (e.header.height, *id)).collect();
+        candidates.sort();
+        let mut bad: HashSet<BlockId> = HashSet::new();
+        for (height, id) in candidates {
+            let Some(e) = self.store.get(&id) else { continue };
+            let (prev, status) = (e.header.prev, e.status);
+            let wrong_at_keep = self.reverts.keep_at(height).is_some_and(|keep| keep != id);
+            if self.revert_vetoed.contains(&id) || bad.contains(&prev) || wrong_at_keep {
+                bad.insert(id);
+                if status != store::Status::Invalid {
+                    self.store.set_status(&id, store::Status::Invalid).map_err(ChainError::Store)?;
+                }
+            }
+        }
+        self.revert_vetoed.extend(bad.iter().copied());
+        let first_bad = (1..=tip).find(|h| self.store.main_at(*h).is_some_and(|id| bad.contains(&id)));
+        if let Some(cut) = first_bad {
+            for h in cut..=tip {
+                let Some(id) = self.store.main_at(h) else { continue };
+                let Some(body) = self.store.body(&id) else { continue };
+                if let Ok(raws) = super::tx::split_body(&body) {
+                    self.retracted_txs.extend(raws.into_iter().skip(1));
+                }
+            }
+            while self.store.tip_height() >= cut {
+                self.store.pop_main().map_err(ChainError::Store)?;
+            }
+        }
+        self.store.persist().map_err(ChainError::Store)?;
+        for r in triggered {
+            revert::append(&home.join(REVERTED_LOG), &r).map_err(|e| ChainError::Store(format!("{REVERTED_LOG}: {e}")))?;
+            self.events.push(Event::Reverted { to_height: r.to_height, keep: r.keep, vetoed: r.vetoed.clone(), rehearsal: r.rehearsal });
+            self.reverted = Some(r);
+        }
+        Ok(())
     }
 
     /// Recovery: replay every main-chain body on the genesis state and
@@ -240,7 +345,9 @@ impl Chain {
 
     /// The error for a header that is, or descends from, a vetoed block.
     pub(super) fn vetoed_error(&self, height: u64) -> ChainError {
-        let expected = self.checkpoints.held().filter(|(h, _)| **h <= height).last().map(|(_, id)| *id).unwrap_or([0; 32]);
+        let held = self.checkpoints.held().filter(|(h, _)| **h <= height).last().map(|(_, id)| *id);
+        // a revert's `keep` is a compiled checkpoint (§5.6)
+        let expected = held.or_else(|| self.reverts.latest_at_or_below(height).map(|e| e.keep)).unwrap_or([0; 32]);
         ChainError::Checkpoint { height, expected }
     }
 
@@ -275,17 +382,17 @@ impl Chain {
 
     /// Steps 1–5 without storing.
     pub(super) fn check_header(&self, header: &Header, now: u64) -> Result<U256, ChainError> {
-        header.check_syntax(&self.rules.chain).map_err(ChainError::Header)?;
-        match rule_set_at(header.height) {
-            Some(rs) if rs == RULE_SET => {}
-            Some(_) | None => return Err(ChainError::RuleSetUnknown(header.height)),
-        }
+        // §7.1 extended by the revert entries (§5.6): the rule set the height requires
+        let Some(rule_set) = self.reverts.rule_set_at(header.height) else {
+            return Err(ChainError::RuleSetUnknown(header.height));
+        };
+        header.check_syntax_for(&self.rules.chain, rule_set).map_err(ChainError::Header)?;
         if header.height == 0 {
             return Err(ChainError::Genesis);
         }
         let parent = self.entry(&header.prev).ok_or(ChainError::UnknownParent(header.prev))?;
         if parent.status == store::Status::Invalid {
-            if self.vetoed.contains(&header.prev) {
+            if self.vetoed.contains(&header.prev) || self.revert_vetoed.contains(&header.prev) {
                 return Err(self.vetoed_error(header.height));
             }
             return Err(ChainError::InvalidParent(header.prev));
@@ -300,7 +407,13 @@ impl Chain {
         if header.time > now.saturating_add(MAX_FUTURE_DRIFT) {
             return Err(ChainError::FutureTime { time: header.time, now });
         }
-        let expected = next_bits(self.genesis.anchor(), &parent.header);
+        // §5.6 rule 3: the first block above a revert is not older than the release
+        if let Some(floor) = self.reverts.time_floor(header.height) {
+            if header.time < floor {
+                return Err(ChainError::Time { mtp: floor.saturating_sub(1), actual: header.time });
+            }
+        }
+        let expected = self.bits_after(&parent.header);
         if header.bits != expected {
             return Err(ChainError::Bits { expected, actual: header.bits });
         }
@@ -314,7 +427,51 @@ impl Chain {
                 return Err(ChainError::Checkpoint { height: header.height, expected });
             }
         }
+        // §5.6 rule 1: `keep` is a compiled checkpoint, without key or sunset
+        if let Some(keep) = self.reverts.keep_at(header.height) {
+            if header.id() != keep {
+                return Err(ChainError::Checkpoint { height: header.height, expected: keep });
+            }
+        }
         Ok(chainwork(parent.chainwork, header))
+    }
+
+    /// Expected `bits` of the block after `parent` (§1.5), re-anchored above
+    /// each revert entry (§5.6). `parent` must be stored (the ancestors are
+    /// read from the store); with an empty table it is plain ASERT.
+    pub(super) fn bits_after(&self, parent: &Header) -> u32 {
+        if self.reverts.is_empty() {
+            return next_bits(self.genesis.anchor(), parent);
+        }
+        let parent_id = parent.id();
+        let reanchors = self.reverts.reanchors();
+        next_bits_reverted(self.genesis.anchor(), &reanchors, parent, &|h| {
+            self.store.ancestor_at(&parent_id, h).and_then(|id| self.store.get(&id)).map(|e| e.header)
+        })
+    }
+
+    /// The rule set a block at `height` must carry (§7.1, §5.6): the header
+    /// `version & 0xffff` of a template.
+    pub(super) fn rule_set_for(&self, height: u64) -> u16 {
+        self.reverts.rule_set_at(height).unwrap_or(RULE_SET)
+    }
+
+    /// The earliest `time` a block at `height` may carry (§5.6 rule 3); 0 if none.
+    pub(super) fn time_floor(&self, height: u64) -> u64 {
+        self.reverts.time_floor(height).unwrap_or(0)
+    }
+
+    /// Record a header of valid proof of work whose rule set this node does
+    /// not know: `upgrade-required` (§7.1). Anything else is ignored; the
+    /// header is never stored and never relayed.
+    pub(super) fn note_unknown_rule_set(&mut self, header: &Header, error: &ChainError) {
+        let ChainError::Header(HeaderError::RuleSet(rule_set)) = error else { return };
+        if *rule_set <= self.reverts.last_rule_set() || header.chain != self.rules.chain || header.height == 0 {
+            return;
+        }
+        if decode_bits(header.bits).is_ok() && valid_pow(header) {
+            self.upgrade_required = Some((header.height, *rule_set));
+        }
     }
 
     /// Apply a block whose parent is the tip (steps 7–8), then extend.
@@ -339,7 +496,7 @@ impl Chain {
     }
 
     /// Undo the tip block (its journal is in the store).
-    fn retract(&mut self) -> Result<BlockId, ChainError> {
+    pub(super) fn retract(&mut self) -> Result<BlockId, ChainError> {
         let (height, id) = self.store.tip().ok_or(ChainError::Store("empty chain".into()))?;
         if height == 0 {
             return Err(ChainError::Store("cannot retract genesis".into()));
@@ -570,7 +727,28 @@ impl Chain {
         self.entry(&id).expect("tip stored").header
     }
 
-    pub(super) fn genesis_anchor(&self) -> super::daa::Anchor {
-        self.genesis.anchor()
+    /// Drop the finalized block events nobody takes (the wire has no use for
+    /// them, §7.3) and keep the `Reverted` ones for the indexers.
+    pub fn discard_block_events(&mut self) {
+        self.events.retain(|e| !matches!(e, Event::Block { .. }));
+    }
+
+    /// Transactions of the blocks a revert retracted at open, original block
+    /// order, coinbases skipped (§5.6); drained by the first caller, which
+    /// re-admits them to its mempool.
+    pub fn take_retracted_txs(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.retracted_txs)
+    }
+
+    pub fn reverts(&self) -> &RevertTable {
+        &self.reverts
+    }
+
+    pub fn reverted(&self) -> Option<&Reverted> {
+        self.reverted.as_ref()
+    }
+
+    pub fn upgrade_required(&self) -> Option<(u64, u16)> {
+        self.upgrade_required
     }
 }

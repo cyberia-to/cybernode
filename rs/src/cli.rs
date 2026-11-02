@@ -150,6 +150,8 @@ struct NodeArgs {
     relay: bool,
     log_net: bool,
     corpus: Option<PathBuf>,
+    /// `--revert` rehearsal entries (chain.md §5.6), repeatable
+    reverts: Vec<crate::chain::revert::RevertEntry>,
 }
 
 /// Why [`parse_node_args`] could not resolve a flag set.
@@ -159,6 +161,8 @@ enum NodeArgError {
     MissingValue(&'static str),
     /// An argument matched none of the known flags.
     Unknown(String),
+    /// A `--revert` value that does not parse.
+    BadRevert(String),
 }
 
 /// Parse `cybernode node`'s argv into [`NodeArgs`], starting from the caller's
@@ -174,7 +178,7 @@ fn parse_node_args(
 ) -> Result<NodeArgs, NodeArgError> {
     let mut out = NodeArgs {
         home: default_home, bind: default_bind, moniker: default_moniker, help: false, chain: None, home_set: false, bind_set: false,
-        radio: None, peers: None, genesis: None, neuron: None, relay: false, log_net: false, corpus: None,
+        radio: None, peers: None, genesis: None, neuron: None, relay: false, log_net: false, corpus: None, reverts: Vec::new(),
     };
     let mut i = 0;
     while i < args.len() {
@@ -200,6 +204,10 @@ fn parse_node_args(
             "--relay" => out.relay = true,
             "--log-net" => out.log_net = true,
             "--corpus" => out.corpus = Some(PathBuf::from(value(&mut i, "--corpus needs a directory")?)),
+            "--revert" => {
+                let v = value(&mut i, "--revert needs <height>:<keep_hex>:<vetoed_hex>[,<vetoed_hex>…]:<anchor_time>[:<rule_set>]")?;
+                out.reverts.push(crate::chain::revert::parse_flag(&v).map_err(NodeArgError::BadRevert)?);
+            }
             "-h" | "--help" => {
                 out.help = true;
                 return Ok(out);
@@ -259,6 +267,10 @@ fn cmd_node(args: &[String]) {
             eprintln!("unknown node flag `{flag}`");
             std::process::exit(2);
         }
+        Err(NodeArgError::BadRevert(msg)) => {
+            eprintln!("{msg}");
+            std::process::exit(2);
+        }
     };
     if node_args.help {
         println!("cybernode node — run spacepussy-test (cybergraph + bbg) or a phase-1 root chain");
@@ -267,6 +279,12 @@ fn cmd_node(args: &[String]) {
         println!("  cybernode node --chain <pussy|bostrom|dev…> --home DIR --bind HOST:PORT --radio HOST:UDP --peers FILE --moniker NAME");
         println!("             [--genesis FILE] [--neuron NEURON] [--relay] [--log-net]");
         println!("             [--corpus DIR]   # record every block given, with its verdict and state root (blocks.jsonl)");
+        println!("             [--revert HEIGHT:KEEP_HEX:VETOED_HEX[,VETOED_HEX…]:ANCHOR_TIME[:RULE_SET]]…");
+        println!("                              # REHEARSAL of a revert by release (chain.md §5.6), repeatable: the chain returns to block KEEP");
+        println!("                              # at HEIGHT, the VETOED ids and their descendants are invalid, difficulty re-anchors at");
+        println!("                              # ANCHOR_TIME (unix seconds), blocks above HEIGHT carry rule set RULE_SET (default: the last");
+        println!("                              # known rule set + 1). /status and every Reverted event say rehearsal: true; the node refuses to");
+        println!("                              # start on a production chain (pussy, bostrom)");
         println!("             (mining is `cybernode mine --node http://BIND --address NEURON`: /template + /submit)");
         println!("  cybernode node id --home DIR      # radio endpoint id (64 hex) for peers.toml");
     println!("  cybernode genesis build --chain pussy|bostrom|pussy-rc --snapshot DIR --out FILE");
@@ -304,7 +322,7 @@ fn cmd_node(args: &[String]) {
             home: if node_args.home_set { node_args.home } else { node::chain_node::default_home(&chain) },
             chain, genesis: node_args.genesis, radio: Some(radio), peers: node_args.peers, moniker: node_args.moniker,
             neuron,
-            relay: node_args.relay, log_net: node_args.log_net, corpus: node_args.corpus,
+            relay: node_args.relay, log_net: node_args.log_net, corpus: node_args.corpus, reverts: node_args.reverts,
         };
         if let Err(e) = node::run_chain(opts, &bind) {
             eprintln!("cybernode node failed: {e}");
@@ -404,6 +422,10 @@ fn cmd_mine(args: &[String]) {
         }
         Err(NodeArgError::Unknown(flag)) => {
             eprintln!("unknown mine flag `{flag}`");
+            std::process::exit(2);
+        }
+        Err(NodeArgError::BadRevert(msg)) => {
+            eprintln!("{msg}");
             std::process::exit(2);
         }
     };
@@ -616,7 +638,7 @@ fn hostname_fallback() -> String {
 fn hostname_fallback_from<F: Fn(&str) -> Result<String, std::env::VarError>>(get: F) -> String {
     get("HOSTNAME")
         .or_else(|_| get("HOST"))
-        .unwrap_or_else(|_| "soft3-node".into())
+        .unwrap_or_else(|_| "cybernode".into())
 }
 
 fn print_network(n: Network) {
@@ -661,10 +683,10 @@ fn print_help() {
     println!("  cybernode genesis build --chain pussy|bostrom|pussy-rc --snapshot DIR --out FILE");
     println!("                      [--cache DIR] [--export DIR] [--no-root] [--time UNIX]");
     println!("  cybernode genesis verify FILE [--root]");
-    println!("  soft3 manifesto");
-    println!("  soft3 version");
+    println!("  cybernode manifesto");
+    println!("  cybernode version");
     println!();
-    println!("not soft3 networks (cosmos bootloader on cybernode):");
+    println!("not soft3 networks (cosmos bootloader on apparatus hosts):");
     println!("  space-pussy · bostrom");
     println!();
     println!("docs  https://cyber.page/soft3/docs/launch");
@@ -767,6 +789,27 @@ mod tests {
     }
 
     #[test]
+    fn node_args_revert_is_repeatable_and_validated() {
+        let (home, bind, moniker) = defaults();
+        let (k, v) = ("11".repeat(32), "22".repeat(32));
+        let args = vec![
+            "--revert".to_string(),
+            format!("5:{k}:{v}:1700000000"),
+            "--revert".to_string(),
+            format!("9:{k}:{v},{v}:1700000100:4"),
+        ];
+        let parsed = parse_node_args(&args, home.clone(), bind.clone(), moniker.clone()).ok().unwrap();
+        assert_eq!(parsed.reverts.len(), 2);
+        assert!(parsed.reverts.iter().all(|r| r.rehearsal));
+        assert_eq!((parsed.reverts[0].height, parsed.reverts[0].rule_set), (5, 0));
+        assert_eq!((parsed.reverts[1].vetoed.len(), parsed.reverts[1].rule_set), (2, 4));
+        let bad = vec!["--revert".to_string(), "5:nothex:x:1".to_string()];
+        assert!(matches!(parse_node_args(&bad, home.clone(), bind.clone(), moniker.clone()).err().unwrap(), NodeArgError::BadRevert(_)));
+        let missing = vec!["--revert".to_string()];
+        assert!(matches!(parse_node_args(&missing, home, bind, moniker).err().unwrap(), NodeArgError::MissingValue(_)));
+    }
+
+    #[test]
     fn node_args_last_flag_wins_on_repeats() {
         let (home, bind, moniker) = defaults();
         let args = vec![
@@ -844,7 +887,7 @@ mod tests {
     #[test]
     fn hostname_fallback_defaults_when_neither_env_is_set() {
         let got = hostname_fallback_from(|_: &str| Err(std::env::VarError::NotPresent));
-        assert_eq!(got, "soft3-node");
+        assert_eq!(got, "cybernode");
     }
 
     fn v(items: &[&str]) -> Vec<String> {

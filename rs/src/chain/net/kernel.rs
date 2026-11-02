@@ -149,8 +149,9 @@ impl Inner {
     /// (oldest first), with the txid index kept in step.
     fn moved(&mut self, before: &crate::chain::api::Tip) -> Option<ChainEvent> {
         let after = self.chain.tip();
-        // finalized blocks are the shadow indexers' (chain.md §7.3); the wire has no use for them
-        let _ = self.chain.take_events();
+        // finalized blocks are the shadow indexers' (chain.md §7.3); the wire has no use for
+        // them — but a `Reverted` (§5.6) stays queued for the indexers
+        self.chain.discard_block_events();
         if after.id == before.id {
             return None;
         }
@@ -172,6 +173,36 @@ impl Inner {
             self.index(h);
         }
         Some(ChainEvent::NewTip { height: after.height, id: after.id, reorged_out })
+    }
+}
+
+/// The revert fields of `/status`, rendered (chain.md §5.6, §7.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevertStatus {
+    pub activations: String,
+    pub reverts: String,
+    pub reverted: String,
+    pub rehearsal: bool,
+    /// `(height, rule_set)` last seen
+    pub upgrade_required: Option<(u64, u16)>,
+}
+
+impl RevertStatus {
+    /// The `/status` lines: `reverts`, `reverted`, `rehearsal`,
+    /// `upgrade-required` (with `upgrade-height` and `upgrade-rule-set`
+    /// once a block of an unknown rule set was seen).
+    pub fn lines(&self) -> String {
+        let mut out = format!(
+            "reverts: {}\nreverted: {}\nrehearsal: {}\nupgrade-required: {}\n",
+            self.reverts,
+            self.reverted,
+            self.rehearsal,
+            self.upgrade_required.is_some()
+        );
+        if let Some((height, rule_set)) = self.upgrade_required {
+            out.push_str(&format!("upgrade-height: {height}\nupgrade-rule-set: {rule_set}\n"));
+        }
+        out
     }
 }
 
@@ -253,6 +284,30 @@ impl KernelChain {
     /// The `next-bits` of `/status`: ASERT on the tip (§1.5).
     pub fn next_bits(&self) -> u32 {
         self.lock().chain.status().next_bits
+    }
+
+    /// Transactions of the blocks a revert by release retracted at open
+    /// (chain.md §5.6), original block order, coinbases skipped; the first
+    /// call drains them. The caller re-admits each to its mempool, which
+    /// keeps only those still valid on the new tip.
+    pub fn take_retracted_txs(&self) -> Vec<Vec<u8>> {
+        self.lock().chain.take_retracted_txs()
+    }
+
+    /// The revert fields of `/status` (chain-wire §7), cybermark lines:
+    /// `activations`, `reverts`, `reverted`, `rehearsal`, `upgrade-required`.
+    /// With an empty table and no unknown rule set seen they read `1@0`,
+    /// `none`, `none`, `false`, `false`.
+    pub fn revert_status(&self) -> RevertStatus {
+        let inner = self.lock();
+        let chain = &inner.chain;
+        RevertStatus {
+            activations: chain.reverts().activations_line(),
+            reverts: chain.reverts().status_line(),
+            reverted: chain.reverted().map(|r| r.status_line()).unwrap_or_else(|| "none".into()),
+            rehearsal: chain.reverts().any_rehearsal(),
+            upgrade_required: chain.upgrade_required(),
+        }
     }
 
     /// The `GET /tip` answer of chain-wire §7, rendered by the kernel.

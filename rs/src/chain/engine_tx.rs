@@ -131,7 +131,7 @@ pub fn header_template(chain: &mut Chain, to: Id, time: u64, mempool: &[Vec<u8>]
     let height = parent.height + 1;
     let locked = chain.locked_at(height);
     let mtp = chain.mtp_of_tip();
-    let time = time.max(mtp + 1);
+    let time = time.max(mtp + 1).max(chain.time_floor(height));
 
     let mut candidates: Vec<(Vec<u8>, Tx)> = mempool
         .iter()
@@ -210,9 +210,9 @@ pub fn header_template(chain: &mut Chain, to: Id, time: u64, mempool: &[Vec<u8>]
     let state_root = applied.root;
     chain.state_mut().revert(&applied.undo);
 
-    let bits = super::daa::next_bits(chain.genesis_anchor(), &parent);
+    let bits = chain.bits_after(&parent);
     let header = Header {
-        version: 1,
+        version: u32::from(chain.rule_set_for(height)),
         height,
         time,
         bits,
