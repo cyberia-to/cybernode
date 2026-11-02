@@ -1,9 +1,9 @@
 //! One chain node: the consensus kernel behind [`ChainView`]
 //! ([`KernelChain`]), its mempool and the wire, served over the HTTP adapter
-//! (chain_routes.rs). Mining is a separate process: `soft3 mine --node URL`
+//! (chain_routes.rs). Mining is a separate process: `cybernode mine --node URL`
 //! speaks `/template` and `/submit` (chain-wire §7).
-//! `soft3 node --chain <name> --home DIR --bind HOST:PORT --radio HOST:UDP
-//! --peers FILE --moniker NAME` (deploy/chain/soft3-chain@.service).
+//! `cybernode node --chain <name> --home DIR --bind HOST:PORT --radio HOST:UDP
+//! --peers FILE --moniker NAME` (deploy/chain/cybernode@.service).
 
 use std::io;
 use std::net::SocketAddr;
@@ -131,7 +131,7 @@ impl ChainNode {
                 let text = std::fs::read_to_string(path)?;
                 let (peers, skipped) = discovery::parse_peers(&text, &name).map_err(io::Error::other)?;
                 for s in skipped {
-                    eprintln!("  peers: {s:?} has no endpoint id — skipped (QUIC dials need the id; `soft3 node id`)");
+                    eprintln!("  peers: {s:?} has no endpoint id — skipped (QUIC dials need the id; `cybernode node id`)");
                 }
                 peers
             }

@@ -3,7 +3,7 @@ title: genesis pipeline
 tags: cyber, soft3, spec, genesis, bostrom, pussy
 crystal-type: spec
 crystal-domain: cyber
-alias: genesis pipeline, soft3 genesis, genesis builder
+alias: genesis pipeline, cybernode genesis, soft3 genesis, genesis builder
 ---
 
 # genesis pipeline
@@ -11,7 +11,7 @@ alias: genesis pipeline, soft3 genesis, genesis builder
 How the burial snapshots of the bootloader chains become the genesis file of
 the phase-1 PoW root chain. The file format, the derivation rules and block 0
 are normative in [chain.md §4](chain.md#4-genesis); this page is the
-pipeline that implements them (`crate/src/genesis/`, `soft3 genesis`), the
+pipeline that implements them (`rs/src/genesis/`, `cybernode genesis`), the
 decisions it takes where §4 leaves room, and its debug export. The node
 (`chain/genesis.rs`) consumes the file through `soft3::genesis::state::load`
 and must reproduce the recorded block-0 root. Companion contracts:
@@ -38,8 +38,8 @@ fallback. `state_export.json.gz` is not read.
 ## command
 
 ```
-soft3 genesis build --chain pussy|bostrom --snapshot DIR --out FILE [--cache DIR] [--export DIR] [--no-root] [--time UNIX]
-soft3 genesis verify FILE [--root]
+cybernode genesis build --chain pussy|bostrom --snapshot DIR --out FILE [--cache DIR] [--export DIR] [--no-root] [--time UNIX]
+cybernode genesis verify FILE [--root]
 ```
 
 `build` writes the genesis file to `FILE` and a report to `FILE.json`
