@@ -442,7 +442,7 @@ balance of `legacy_owner(hrp, account_id)` (all tokens) moves to
 
 Status: draft for the owner's verdict (plan row P5, decision D16: pussy "fully
 on proofs, without signatures"). Receipt:
-[audit/chain/proof-auth-2026-11.md](../audit/chain/proof-auth-2026-11.md).
+[soft3 audit/chain/proof-auth-2026-11.md](https://github.com/cyberia-to/soft3/blob/release/phase1/audit/chain/proof-auth-2026-11.md).
 `A` is a placeholder. It gets a number when its activation entry is written
 (§7.1: rule-set numbers rise with activation height). If the owner puts it
 at genesis, this section becomes part of rule set 1.
