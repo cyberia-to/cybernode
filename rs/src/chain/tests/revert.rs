@@ -7,7 +7,10 @@ use super::*;
 use crate::chain::api::{BlockVerdict, ChainError, Event};
 use crate::chain::daa::{self, Anchor, ReAnchor};
 use crate::chain::header::{HeaderError, decode_bits};
+use crate::chain::params::MAX_REORG;
 use crate::chain::revert::{RevertEntry, Reverted};
+use crate::chain::revert_statement::{RevertStatement, StatementError};
+use crate::chain::select::{Checkpoint, CheckpointError};
 use crate::chain::state::StateBackend;
 use crate::chain::store::Status;
 use crate::chain::u256::U256;
@@ -44,6 +47,7 @@ fn entry_for(blocks: &[Block], anchor_time: u64) -> RevertEntry {
         anchor_time,
         rule_set: 0,
         rehearsal: true,
+        counter: 0,
     }
 }
 
@@ -232,9 +236,9 @@ fn an_inconsistent_table_refuses_to_open() {
     refuses(vec![RevertEntry { vetoed: vec![], ..ok.clone() }], "vetoed is empty");
     refuses(vec![RevertEntry { rule_set: 1, ..ok.clone() }], "rule set");
     refuses(vec![RevertEntry { keep: blocks[4].id(), ..ok.clone() }], "is at height 5");
-    let off_branch = RevertEntry { height: 9, keep: fork[4].id(), vetoed: vec![fork[5].id()], anchor_time: 2_000, rule_set: 0, rehearsal: true };
+    let off_branch = RevertEntry { height: 9, keep: fork[4].id(), vetoed: vec![fork[5].id()], anchor_time: 2_000, rule_set: 0, rehearsal: true, counter: 0 };
     refuses(vec![ok.clone(), off_branch], "does not descend");
-    let on_old = RevertEntry { height: 9, keep: blocks[8].id(), vetoed: vec![blocks[9].id()], anchor_time: 2_000, rule_set: 0, rehearsal: true };
+    let on_old = RevertEntry { height: 9, keep: blocks[8].id(), vetoed: vec![blocks[9].id()], anchor_time: 2_000, rule_set: 0, rehearsal: true, counter: 0 };
     refuses(vec![ok.clone(), on_old], "keep descends from");
     // the consistent table opens, and the store was not touched by the refusals
     let c = net.reopen_with(0, vec![ok.clone()]).unwrap();
@@ -247,7 +251,7 @@ fn a_rehearsal_refuses_to_start_on_a_production_chain() {
     let mut a = net.open("a");
     let blocks: Vec<Block> = (0..3).map(|_| mine_fast(&mut a, net.neurons[1], &[])).collect();
     drop(a);
-    let entry = RevertEntry { height: 2, keep: blocks[1].id(), vetoed: vec![blocks[2].id()], anchor_time: 2_000, rule_set: 0, rehearsal: true };
+    let entry = RevertEntry { height: 2, keep: blocks[1].id(), vetoed: vec![blocks[2].id()], anchor_time: 2_000, rule_set: 0, rehearsal: true, counter: 0 };
     match net.reopen_with(0, vec![entry]) {
         Err(ChainError::Store(m)) => assert!(m.contains("production chain"), "{m}"),
         Err(e) => panic!("{e:?}"),
@@ -329,6 +333,178 @@ fn asert_reanchors_in_the_engine_and_is_unchanged_without_an_entry() {
     let t = template(&mut a, m1, 0, &[]);
     assert_eq!(t.header.version & 0xffff, 2);
     assert_eq!(t.header.bits, first.header.bits);
+}
+
+// ── revert statements of the owner key (chain.md §5.6) ─────────────────
+
+/// A statement signed by the test genesis' checkpoint key (the test's own key,
+/// never a real secret).
+fn statement(net: &Net, height: u64, keep: Id, counter: u64, anchor_time: u64) -> RevertStatement {
+    RevertStatement::sign(&net.genesis.chain_id, height, keep, counter, anchor_time, &net.checkpoint_key).unwrap()
+}
+
+fn reverted(height: u64, keep: Id) -> Event {
+    Event::Reverted { to_height: height, keep, vetoed: Vec::new(), rehearsal: false }
+}
+
+#[test]
+fn a_statement_of_the_checkpoint_key_rewinds_the_chain_and_no_other_does() {
+    let net = Net::new(3);
+    let m1 = net.neurons[2];
+    let mut a = net.open("a");
+    let blocks = grow_old(&net, &mut a);
+    let keep = blocks[H as usize - 1].id();
+    let anchor = blocks[H as usize - 1].header.time + 300;
+    let old7 = blocks[H as usize].id();
+    let chain = net.genesis.chain_id;
+
+    // (b) a statement of any other key is refused and changes nothing
+    let forged = RevertStatement::sign(&chain, H, keep, 1, anchor, &key(5)).unwrap();
+    assert_eq!(a.accept_revert_statement(&forged), Err(StatementError::Signature));
+    assert_eq!((a.tip().height, a.reverts().is_empty(), a.take_events().len()), (N as u64, true, 0));
+    // (c) a checkpoint signature is not a revert, and a revert signature is not a checkpoint
+    let cp = Checkpoint::sign(&chain, H, keep, &net.checkpoint_key).unwrap();
+    let as_revert = RevertStatement { version: 1, chain, height: H, keep, counter: 1, anchor_time: anchor, sig: cp.sig };
+    assert_eq!(a.accept_revert_statement(&as_revert), Err(StatementError::Signature));
+    let st = statement(&net, H, keep, 1, anchor);
+    let as_checkpoint = Checkpoint { height: 120, block_id: keep, sig: st.sig.clone() };
+    assert_eq!(a.accept_checkpoint(&as_checkpoint), Err(ChainError::CheckpointRejected(CheckpointError::Signature)));
+    assert_eq!(a.tip().height, N as u64);
+    // a counter of zero is not a statement; nor is one for another chain
+    assert_eq!(a.accept_revert_statement(&statement(&net, H, keep, 0, anchor)), Err(StatementError::Counter(0)));
+    let other_chain = RevertStatement::sign(&[9; 32], H, keep, 1, anchor, &net.checkpoint_key).unwrap();
+    assert_eq!(a.accept_revert_statement(&other_chain), Err(StatementError::WrongChain));
+
+    // (a) the owner's statement: back to `keep`, the empty veto list, the time floor and the rule set do the rest
+    assert_eq!(a.accept_revert_statement(&st), Ok(true));
+    assert_eq!((a.tip().height, a.tip().id), (H, keep));
+    assert_eq!(a.store().get(&old7).unwrap().status, Status::Invalid, "the old block at H + 1 is older than the anchor");
+    assert_eq!(a.store().get(&blocks[N - 1].id()).unwrap().status, Status::Invalid);
+    assert!(a.status().conserved);
+    assert_eq!(a.take_events(), vec![reverted(H, keep)]);
+    assert!(a.take_retracted_txs().is_empty(), "the retracted transactions are dropped, not re-admitted");
+    let entry = a.status().reverts[0].clone();
+    assert_eq!((entry.height, entry.counter, entry.rule_set, entry.vetoed.len(), entry.rehearsal), (H, 1, 2, 0, false));
+    assert_eq!(a.reverts().activations_line(), format!("1@0,2@{}", H + 1));
+    assert_eq!(a.status().reverted, Some(Reverted { to_height: H, keep, vetoed: Vec::new(), rehearsal: false }));
+    // the old branch is refused, the new one is rule set 2 at or after the anchor
+    assert!(matches!(a.accept_header(&blocks[H as usize].header, NOW), Err(ChainError::Checkpoint { height, expected }) if height == H + 1 && expected == keep));
+    let new: Vec<Block> = (0..3).map(|_| mine_fast(&mut a, m1, &[])).collect();
+    assert_eq!(new[0].header.version & 0xffff, 2);
+    assert!(new[0].header.time >= anchor);
+    // a block at H + 1 on the kept branch that is older than the anchor is refused
+    let mut c = net.open("c");
+    feed(&mut c, &blocks[..H as usize]);
+    let early = mine_fast(&mut c, m1, &[]);
+    assert!(early.header.time < anchor);
+    let early_v2 = solve(Header { version: 2, ..early.header });
+    assert!(matches!(a.accept_header(&early_v2, NOW), Err(ChainError::Time { .. })));
+    // (d) the same statement again changes nothing
+    assert_eq!(a.accept_revert_statement(&st), Ok(false));
+    assert_eq!(a.tip().height, H + 3);
+}
+
+#[test]
+fn a_statement_goes_back_deeper_than_max_reorg() {
+    let net = Net::new(3);
+    let m0 = net.neurons[1];
+    let mut a = net.open("a");
+    let blocks = mine_n(&mut a, m0, MAX_REORG as usize + 11);
+    const BACK: u64 = 3;
+    let keep = blocks[BACK as usize - 1].id();
+    assert!(!crate::chain::select::reorg_allowed(a.tip().height, BACK), "the reorg limit forbids this depth");
+    assert_eq!(a.accept_revert_statement(&statement(&net, BACK, keep, 1, blocks[BACK as usize - 1].header.time + 300)), Ok(true));
+    assert_eq!((a.tip().height, a.tip().id), (BACK, keep));
+    // the state is the state of a node that never saw the rest
+    let mut b = net.open("b");
+    feed(&mut b, &blocks[..BACK as usize]);
+    same_tip(&a, &b);
+}
+
+#[test]
+fn a_higher_counter_at_a_lower_height_supersedes_and_a_lower_counter_is_ignored() {
+    let net = Net::new(3);
+    let (m0, m1) = (net.neurons[1], net.neurons[2]);
+    let mut a = net.open("a"); // store 0
+    let blocks = grow_old(&net, &mut a);
+    let (h1, h2) = (8u64, 5u64);
+    let st1 = statement(&net, h1, blocks[h1 as usize - 1].id(), 1, blocks[h1 as usize - 1].header.time + 300);
+    assert_eq!(a.accept_revert_statement(&st1), Ok(true));
+    assert_eq!(a.tip().height, h1);
+    let mid: Vec<Block> = (0..3).map(|_| mine_fast(&mut a, m1, &[])).collect();
+    assert_eq!(mid[0].header.version & 0xffff, 2);
+    assert_eq!(a.tip().height, h1 + 3);
+
+    // counter 2 at H2 < H1 drops the entry of counter 1 and goes further back
+    let keep2 = blocks[h2 as usize - 1].id();
+    let st2 = statement(&net, h2, keep2, 2, 5_000);
+    assert_eq!(a.accept_revert_statement(&st2), Ok(true));
+    assert_eq!((a.tip().height, a.tip().id), (h2, keep2));
+    let held: Vec<_> = a.status().reverts.iter().map(|e| (e.height, e.counter, e.rule_set)).collect();
+    assert_eq!(held, vec![(h2, 2, 3)], "entry 1 is gone; the rule set is the compiled max + the counter");
+    assert_eq!(a.reverts().activations_line(), format!("1@0,3@{}", h2 + 1));
+    assert!(a.status().conserved);
+    // (d) a lower counter, and a duplicate, are ignored
+    assert_eq!(a.accept_revert_statement(&st1), Ok(false));
+    assert_eq!(a.accept_revert_statement(&st2), Ok(false));
+    assert_eq!(a.tip().height, h2);
+    let new = mine_fast(&mut a, m0, &[]);
+    assert_eq!((new.header.version & 0xffff, new.header.height), (3, h2 + 1));
+    assert!(new.header.time >= 5_000);
+
+    // (h) a reopened node keeps the reverted chain: the statements are on disk, nothing is applied again
+    let tip = a.tip();
+    let state = a.status().state_root;
+    drop(a);
+    let mut a2 = net.reopen(0);
+    assert_eq!(a2.tip(), tip);
+    assert_eq!(a2.status().state_root, state);
+    let held: Vec<_> = a2.status().reverts.iter().map(|e| (e.height, e.counter)).collect();
+    assert_eq!(held, vec![(h2, 2)]);
+    assert!(a2.take_events().is_empty() && a2.take_retracted_txs().is_empty());
+    assert_eq!(a2.status().reverted, Some(Reverted { to_height: h2, keep: keep2, vetoed: Vec::new(), rehearsal: false }));
+    assert_eq!(a2.accept_revert_statement(&st2), Ok(false), "and knows it holds it");
+    // a drill and an authority do not mix
+    drop(a2);
+    let drill = RevertEntry { height: 2, keep: blocks[1].id(), vetoed: vec![blocks[2].id()], anchor_time: 2_000, rule_set: 0, rehearsal: true, counter: 0 };
+    match net.reopen_with(0, vec![drill]) {
+        Err(ChainError::Store(m)) => assert!(m.contains("must not mix"), "{m}"),
+        Err(e) => panic!("{e:?}"),
+        Ok(_) => panic!("opened with a rehearsal over held statements"),
+    }
+}
+
+#[test]
+fn a_statement_can_come_before_its_keep_and_a_wrong_height_is_refused() {
+    let net = Net::new(3);
+    let mut a = net.open("a");
+    let blocks = grow_old(&net, &mut a);
+    let keep = blocks[H as usize - 1].id();
+    let anchor = blocks[H as usize - 1].header.time + 300;
+    let st = statement(&net, H, keep, 1, anchor);
+
+    // a node at height 3 has neither `keep` nor a tip at H: it holds the statement and rewinds nothing
+    let mut e = net.open("e");
+    feed(&mut e, &blocks[..3]);
+    assert_eq!(e.accept_revert_statement(&st), Ok(true));
+    assert_eq!(e.tip().height, 3);
+    assert!(e.take_events().is_empty(), "nothing to revert yet");
+    feed(&mut e, &blocks[3..H as usize]);
+    assert_eq!(e.tip().id, keep);
+    // the old block above `keep` has the old rule set: refused; the new branch is taken
+    assert!(matches!(e.accept_block(&blocks[H as usize], NOW), Err(ChainError::Header(HeaderError::RuleSet(1)))));
+    // a statement whose `keep` is stored at another height is refused and not held
+    let wrong = statement(&net, H - 1, keep, 1, anchor);
+    match a.accept_revert_statement(&wrong) {
+        Err(StatementError::Inconsistent(m)) => assert!(m.contains(&format!("is at height {H}")), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(a.reverts().is_empty());
+    assert_eq!(a.tip().height, N as u64);
+    // and with a rehearsal in the table, the owner's word is not taken
+    let drill = RevertEntry { height: 2, keep: [1; 32], vetoed: vec![[2; 32]], anchor_time: 2_000, rule_set: 0, rehearsal: true, counter: 0 };
+    let mut r = net.open_reverts("r", vec![drill]);
+    assert_eq!(r.accept_revert_statement(&st), Err(StatementError::Rehearsal));
 }
 
 /// The receipt for the spec's "to be timed" cost line (chain.md §5.6): the

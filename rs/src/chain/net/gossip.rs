@@ -9,7 +9,7 @@ use iroh_gossip::api::{Event, GossipReceiver};
 use n0_future::StreamExt;
 use radio::EndpointId;
 
-use super::chain_view::{BlockError, BlockVerdict, HeaderVerdict};
+use super::chain_view::{BlockError, BlockVerdict, HeaderError, HeaderVerdict};
 use super::codec::{hash_tagged, txid, Header};
 use super::frames::{Checkpoint, Frame, FrameError, MAX_GOSSIP_BYTES};
 use super::peers::{Direction, Peer};
@@ -93,6 +93,24 @@ async fn on_header(inner: Arc<Inner>, from: EndpointId, header: Header) {
             let _ = inner.sync_hint.try_send(super::sync::Hint::Peer(from));
         }
         Ok(HeaderVerdict::Held) => {}
+        // a rule set we do not know may be a revert statement we have not heard
+        // (chain.md §5.6): ask the sender for its checkpoints and statements, then
+        // sync from it; only if that leaves it unexplained is it upgrade-required, as before
+        Err(HeaderError::UnknownRuleSet) => {
+            inner.say(&format!("header at {} from {}: a rule set we do not know", header.height, short(&from)));
+            if let Some(conn) = inner.conn(&from) {
+                // once per peer per two minutes: a header flood must not become a request flood
+                let key = super::codec::hash(from.as_bytes());
+                if !inner.recently_relayed(&key) {
+                    inner.note_relayed(key);
+                    let inner = inner.clone();
+                    tokio::spawn(async move {
+                        super::sync::fetch_checkpoints(&inner, from, &conn).await;
+                        let _ = inner.sync_hint.try_send(super::sync::Hint::Peer(from));
+                    });
+                }
+            }
+        }
         Err(e) => inner.charge(&from, e.score(), &format!("header: {e}")),
     }
 }
@@ -271,6 +289,23 @@ pub(crate) fn hold_checkpoint(inner: &Inner, from: &EndpointId, c: &Checkpoint) 
     fresh
 }
 
+/// A revert statement from `from` (gossiped, answered to `k`, or `None` when
+/// submitted here): verified, held, persisted and applied by the kernel
+/// (chain.md §5.6). A bad signature is +10; a statement the node cannot use
+/// is logged, never scored. `true` when it is new — the gossip path relays it.
+pub(crate) fn hold_revert(inner: &Inner, from: Option<&EndpointId>, bytes: &[u8]) -> bool {
+    match inner.chain.accept_revert_statement(bytes) {
+        Ok(new) => new,
+        Err(e) => {
+            match from {
+                Some(from) => inner.charge(from, e.score, &format!("revert statement: {e}")),
+                None => inner.say(&format!("revert statement: {e}")),
+            }
+            false
+        }
+    }
+}
+
 pub(crate) async fn run_checkpoints(inner: Arc<Inner>, mut rx: GossipReceiver) {
     // a lagged receiver (a burst beyond the channel) skips, it does not end the topic
     while let Some(event) = rx.next().await {
@@ -288,6 +323,11 @@ pub(crate) async fn run_checkpoints(inner: Arc<Inner>, mut rx: GossipReceiver) {
             Some(Frame::Checkpoint(c)) => {
                 if hold_checkpoint(&inner, &from, &c) {
                     let _ = inner.checkpoints_tx.broadcast_neighbors(bytes::Bytes::from(Frame::Checkpoint(c).encode())).await;
+                }
+            }
+            Some(Frame::Revert(bytes)) => {
+                if hold_revert(&inner, Some(&from), &bytes) {
+                    let _ = inner.checkpoints_tx.broadcast_neighbors(bytes::Bytes::from(Frame::Revert(bytes).encode())).await;
                 }
             }
             Some(Frame::Block { .. }) => inner.charge(&from, 100, "body on gossip"),
