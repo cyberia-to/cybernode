@@ -51,7 +51,7 @@ Machine facts behind cyberproxy: `apparatus/servers/cyberproxy/inventory-2026-10
 | limits | MemoryMax 2G (drop-in) | `ulimit -n 65536` in the runner; no MemoryMax, thread count only watched by the check |
 | env overrides for the check | none (defaults) | `SOFT3_ETC=/srv/forge/claude/chain/etc SOFT3_STATE=/srv/forge/claude/chain/state` (run-node.sh sets them) |
 | clock check | `timedatectl` | kernel `adjtimex` via python3 (state 5 = unsynchronized = DOWN) |
-| miner | none | `cybernode mine --backend cpu` when `SOFT3_MINE_ADDRESS` is set |
+| miner | none | `cybernode mine` when `SOFT3_MINE_ADDRESS` is set |
 
 7780 stays with the 0.10.0 chaosnet node (`spacepussy-test.service`); it is untouched.
 Its files are the legacy stand in `deploy/` (`spacepussy-test.service`,
@@ -121,7 +121,7 @@ cyberproxy as below. agent-a: see the variant after step 8.
    60 s and agree on height; on the dev chain the script goes on to assert a
    late joiner's IBD, a transaction crossing the fleet, a depth-3 fork reorg
    and a kill-and-restart recovery, all on the consensus kernel with
-   `cybernode mine --backend cpu` processes doing the work (receipts:
+   `cybernode mine` processes doing the work (receipts:
    `audit/chain/net-2026-10-15.md`, `audit/chain/slice-2026-10-16.md`).
 2. Dress rehearsal on the real two hosts with `SOFT3_CHAIN=pussy-rc` (the
    launch allow-list has it), ports 7783/7793:

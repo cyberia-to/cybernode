@@ -1,7 +1,7 @@
 #!/usr/bin/env nu
 # chain-fleet — three cybernode root-chain nodes on one machine, each with its own home,
 # HTTP bind, radio UDP port and bootstrap-peers file, on the consensus kernel, mined by
-# `cybernode mine --backend cpu` processes against their /template + /submit; the local
+# `cybernode mine` (the settlement-ticket miner, no backend) processes against their /template + /submit; the local
 # rehearsal of deploy/chain/README.md before anything touches the apparatus hosts.
 # Modeled on cyb/harness/fleet.sh. Moved from soft3/scripts on 2026-11-02 (proposal cybernode § 5).
 #
@@ -116,7 +116,7 @@ def main [
     print $"  ok    all ($n) nodes answer /status"
     let m1 = (miner-start $bin $chain ($fleet | get 0) $threads)
     let m2 = (miner-start $bin $chain ($fleet | get 1) $threads)
-    print $"chain-fleet: cybernode mine --backend cpu --threads ($threads) on node-1 \(pid ($m1)\) and node-2 \(pid ($m2)\)"
+    print $"chain-fleet: cybernode mine --workers ($threads) on node-1 \(pid ($m1)\) and node-2 \(pid ($m2)\)"
 
     # peers connect
     if not (wait-for 30 {|| ($fleet | all {|node| (peer-count $node.http) >= 1 }) }) {
@@ -279,9 +279,9 @@ def launch [bin: string, chain: string, genesis: string, node: record] {
   $pid
 }
 
-# `cybernode mine --backend cpu` against one node's /template + /submit, paying the node's miner address
+# `cybernode mine` (the settlement-ticket miner, no backend) against one node's /template + /submit, paying the node's miner address
 def miner-start [bin: string, chain: string, node: record, threads: int] {
-  let cmd = $"exec ($bin) mine --chain ($chain) --node http://127.0.0.1:($node.http) --address ($node.miner) --backend cpu --threads ($threads) >> ($node.home)/mine.log 2>&1 & echo $!"
+  let cmd = $"exec ($bin) mine --chain ($chain) --node http://127.0.0.1:($node.http) --address ($node.miner) --workers ($threads) >> ($node.home)/mine.log 2>&1 & echo $!"
   let pid = (^bash -c $cmd | str trim | into int)
   $"($pid)\n" | save -a $"($node.work)/pids"
   $pid
