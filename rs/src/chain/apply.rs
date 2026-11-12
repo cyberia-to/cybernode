@@ -25,6 +25,10 @@ pub struct Rules {
     pub s0: u64,
     /// the epoch clock: `EpochClock::SPEC` on the launch chains
     pub clock: EpochClock,
+    /// `W_TICKET`: the entries of a block's sample (rewards.md §7)
+    pub w_ticket: usize,
+    /// `V_BUDGET`: full sample verifications per node per block interval
+    pub v_budget: usize,
 }
 
 impl Rules {
@@ -132,6 +136,10 @@ pub enum BlockError {
     /// the settlement of `epoch` is due at this height and the node has no
     /// result for it (chain-economy §2.5: it waits, never guesses)
     Settlement { epoch: u64 },
+    /// the header's sample does not commit to the ticket of its template on
+    /// the epoch's game (chain.md §5.5 step 8; rewards.md §7): invalid, and
+    /// a protocol error of the peer that sent it (chain-wire §5)
+    Sample(String),
     /// Σ stake keys differs from the running stake total (§6.3)
     StakeTotal { cards: u128, total: u64 },
     Overflow,
@@ -153,6 +161,7 @@ impl std::fmt::Display for BlockError {
             BlockError::StateRoot { .. } => write!(f, "state_root mismatch"),
             BlockError::Conservation { sum, supply, .. } => write!(f, "conservation: balances sum {sum}, supply {supply}"),
             BlockError::Settlement { epoch } => write!(f, "settlement of epoch {epoch} is not computed"),
+            BlockError::Sample(s) => write!(f, "sample: {s}"),
             BlockError::StakeTotal { cards, total } => write!(f, "stake keys sum {cards}, running total {total}"),
             BlockError::Overflow => write!(f, "arithmetic overflow"),
         }

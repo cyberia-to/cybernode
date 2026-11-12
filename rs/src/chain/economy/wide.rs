@@ -46,6 +46,10 @@ impl W {
         self.0[1..].iter().all(|l| *l == 0).then_some(self.0[0])
     }
 
+    pub fn to_u128(&self) -> Option<u128> {
+        self.0[2..].iter().all(|l| *l == 0).then_some(self.0[0] as u128 | (self.0[1] as u128) << 64)
+    }
+
     pub fn checked_add(&self, o: &W) -> Option<W> {
         let mut out = [0u64; 8];
         let mut carry = 0u128;

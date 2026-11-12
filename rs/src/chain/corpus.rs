@@ -7,7 +7,7 @@
 //!
 //! - `height`   the block's header height
 //! - `id`       hex of the block id
-//! - `block`    hex of [`Block::encode`] (`header[168] ‖ body`, the `B` frame payload)
+//! - `block`    hex of [`Block::encode`] (`header[200] ‖ body`, the `B` frame payload)
 //! - `verdict`  [`verdict_code`], or `"genesis"` for record 0
 //! - `root`     hex of `R` (the tip's `state_root`) after the call when the verdict
 //!              accepts; `null` for a rejection
@@ -27,6 +27,7 @@ use super::apply::{BlockError, TxError};
 use super::header::{self, BlockId, Header, HeaderError};
 use super::pow::valid_pow;
 use super::state::Id;
+use super::ticket::{EpochGame, sample_of};
 use super::tree;
 use super::tx::{self, Body, Tx};
 
@@ -69,6 +70,8 @@ fn chain_error_code(e: &ChainError) -> String {
         ChainError::Rejected(_) => "rejected".into(),
         ChainError::Genesis => "genesis".into(),
         ChainError::Store(_) => "store".into(),
+        ChainError::VerifyBudget => "verify_budget".into(),
+        ChainError::Game(_) => "game".into(),
     }
 }
 
@@ -96,6 +99,7 @@ fn block_error_code(e: &BlockError) -> String {
         BlockError::StateRoot { .. } => "state_root".into(),
         BlockError::Conservation { .. } => "conservation".into(),
         BlockError::Settlement { .. } => "settlement".into(),
+        BlockError::Sample(_) => "sample".into(),
         BlockError::StakeTotal { .. } => "stake_total".into(),
         BlockError::Overflow => "overflow".into(),
     }
@@ -315,16 +319,18 @@ pub struct Invalid {
     pub expected: String,
 }
 
-/// First nonce (from 0) whose header does (`want = true`) or does not meet
-/// its target and whose id is not in `skip`; bounded, so a hard target yields
-/// `None` for `want = true`. `skip` holds the valid block's id and the ids of
-/// the mutations already generated: each mutation must get an id of its own,
-/// because a body mutation that reused the valid header would put the valid
-/// id in the rejected set (§5.4) and every later one would draw `rejected`
-/// instead of its own code.
-fn grind(mut h: Header, want: bool, skip: &HashSet<BlockId>) -> Option<Header> {
+/// First nonce (from 0) whose header — its sample the ticket of its
+/// template on `game`, or `corrupt`'s rewrite of it — does (`want = true`)
+/// or does not meet its target and whose id is not in `skip`; bounded, so a
+/// hard target yields `None` for `want = true`. `skip` holds the valid
+/// block's id and the ids of the mutations already generated: each mutation
+/// must get an id of its own, because a body mutation that reused the valid
+/// header would put the valid id in the rejected set (§5.4) and every later
+/// one would draw `rejected` instead of its own code.
+fn grind(game: &EpochGame, mut h: Header, want: bool, skip: &HashSet<BlockId>, corrupt: &dyn Fn(&EpochGame, &Header) -> [u8; 32]) -> Option<Header> {
     for n in 0..GRIND_LIMIT {
         h.nonce = n.to_le_bytes();
+        h.sample = corrupt(game, &h);
         if valid_pow(&h) == want && !skip.contains(&h.id()) {
             return Some(h);
         }
@@ -332,22 +338,71 @@ fn grind(mut h: Header, want: bool, skip: &HashSet<BlockId>) -> Option<Header> {
     None
 }
 
-/// The mutations so far and every block id taken (the valid block's included).
-struct Mutations {
-    out: Vec<Invalid>,
-    used: HashSet<BlockId>,
+/// The honest sample of a template (rewards.md §7).
+fn honest(game: &EpochGame, h: &Header) -> [u8; 32] {
+    sample_of(&game.ticket(&h.template(), 2))
 }
 
-impl Mutations {
+/// The invalid tickets (rewards.md §7 "Verification"; chain-conformance §5
+/// amended): a header whose id passes the target with a sample that does
+/// not commit to the ticket of its template.
+fn wrong_marginal(game: &EpochGame, h: &Header) -> [u8; 32] {
+    let mut t = game.ticket(&h.template(), 2);
+    // one marginal off by one unit of 2^-60 nats; the honest sample when the
+    // game has no player (the mutation is then not produced)
+    if let Some(m) = t.marginals.first_mut() {
+        *m += 1;
+    }
+    sample_of(&t)
+}
+
+fn wrong_probe(game: &EpochGame, h: &Header) -> [u8; 32] {
+    let mut t = game.ticket(&h.template(), 2);
+    // the first probe's value off by one unit; the honest sample when the
+    // base has no axon (the mutation is then not produced)
+    if let Some(p) = t.probes.first_mut() {
+        p.value += 1;
+    }
+    sample_of(&t)
+}
+
+/// The marginals in rank order rather than ascending by player: differs
+/// only when the window covers two players out of index order.
+fn wrong_order(game: &EpochGame, h: &Header) -> [u8; 32] {
+    let mut t = game.ticket(&h.template(), 2);
+    t.marginals.reverse();
+    t.covered.reverse();
+    sample_of(&t)
+}
+
+/// The mutations so far and every block id taken (the valid block's included).
+struct Mutations<'a> {
+    out: Vec<Invalid>,
+    used: HashSet<BlockId>,
+    game: &'a EpochGame,
+}
+
+impl Mutations<'_> {
     fn add(&mut self, name: &'static str, header: Header, body: &[u8], expected: &str) {
         self.used.insert(header.id());
         self.out.push(Invalid { name, block: Block { header, body: body.to_vec() }, expected: expected.into() });
     }
 
-    /// Re-grind the nonce so proof of work passes and the id is unused.
+    /// Re-grind the nonce so proof of work passes with the honest sample
+    /// and the id is unused.
     fn sealed(&mut self, name: &'static str, header: Header, body: Vec<u8>, expected: &str) {
-        if let Some(g) = grind(header, true, &self.used) {
+        if let Some(g) = grind(self.game, header, true, &self.used, &honest) {
             self.add(name, g, &body, expected);
+        }
+    }
+
+    /// Re-grind the nonce so the id passes the target with a sample
+    /// `corrupt` rewrites: an invalid ticket (step 8).
+    fn forged(&mut self, name: &'static str, header: Header, body: &[u8], corrupt: &dyn Fn(&EpochGame, &Header) -> [u8; 32]) {
+        if let Some(g) = grind(self.game, header, true, &self.used, corrupt) {
+            if g.sample != honest(self.game, &g) {
+                self.add(name, g, body, "reject:block:sample");
+            }
         }
     }
 }
@@ -367,9 +422,9 @@ fn coinbase_bytes(height: u64, to: Id, amount: u64, extra: [u8; 32]) -> Vec<u8> 
 /// A mutation whose nonce search runs out (hard target) is left out. Mutations needing a transaction (`bad_signature`,
 /// `duplicate_tx`, `coinbase_position`) appear when `valid` carries one;
 /// `replayed_tx` when the last 64 blocks of the main chain carry one.
-pub fn invalid_blocks<C: ChainApi + ?Sized>(chain: &C, valid: &Block) -> Vec<Invalid> {
+pub fn invalid_blocks<C: ChainApi + ?Sized>(chain: &C, valid: &Block, game: &EpochGame) -> Vec<Invalid> {
     let h = valid.header;
-    let mut m = Mutations { out: Vec::new(), used: HashSet::from([valid.id()]) };
+    let mut m = Mutations { out: Vec::new(), used: HashSet::from([valid.id()]), game };
 
     // steps 1–5: header only (everything before PoW fails before PoW is read)
     m.add("wrong_chain", Header { chain: [0xEE; 32], ..h }, &valid.body, "reject:header:wrong_chain");
@@ -385,9 +440,19 @@ pub fn invalid_blocks<C: ChainApi + ?Sized>(chain: &C, valid: &Block) -> Vec<Inv
             m.add("wrong_bits", Header { bits: header::encode_bits(harder), ..h }, &valid.body, "reject:bits");
         }
     }
-    if let Some(bad) = grind(h, false, &m.used) {
+    if let Some(bad) = grind(game, h, false, &m.used, &honest) {
         m.add("bad_pow", bad, &valid.body, "reject:pow");
     }
+
+    // step 8, the sample (rewards.md §7): the id passes, the ticket does not
+    m.forged("wrong_marginal", h, &valid.body, &wrong_marginal);
+    m.forged("wrong_probe", h, &valid.body, &wrong_probe);
+    m.forged("wrong_preimage_order", h, &valid.body, &wrong_order);
+    m.forged("garbage_sample", h, &valid.body, &|_, h| {
+        let mut s = h.template();
+        s[0] ^= 0xff;
+        header::hash32(&s)
+    });
 
     // steps 6–8: body and state rules, the nonce re-ground
     let rooted = |raws: &[Vec<u8>]| Header { tx_root: tree::tx_root(raws), ..h };
@@ -446,6 +511,16 @@ pub fn invalid_blocks<C: ChainApi + ?Sized>(chain: &C, valid: &Block) -> Vec<Inv
         }
     }
     m.out
+}
+
+/// A block whose ticket was computed on another game (`stale`: the previous
+/// epoch's base), the id passing the target: `reject:block:sample`.
+pub fn stale_base<C: ChainApi + ?Sized>(_chain: &C, valid: &Block, game: &EpochGame, stale: &EpochGame, used: &HashSet<BlockId>) -> Option<Invalid> {
+    if stale.cluster == game.cluster && stale.beacon == game.beacon {
+        return None;
+    }
+    let g = grind(game, valid.header, true, used, &|_, h| honest(stale, h))?;
+    (g.sample != honest(game, &g)).then(|| Invalid { name: "stale_base", block: Block { header: g, body: valid.body.clone() }, expected: "reject:block:sample".into() })
 }
 
 fn with_tx(raws: &[Vec<u8>], at: usize, replacement: Vec<u8>) -> Vec<Vec<u8>> {

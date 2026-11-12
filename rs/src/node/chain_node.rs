@@ -170,6 +170,7 @@ impl ChainNode {
     pub fn submit(&self, header: Header) -> Result<Id, SubmitError> {
         let mut zero = header;
         zero.nonce = [0; 16];
+        zero.sample = [0; 32];
         let key = zero.id();
         let body = {
             let templates = self.templates.lock().expect("templates");

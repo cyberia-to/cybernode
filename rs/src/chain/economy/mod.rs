@@ -11,13 +11,17 @@
 //! - [`weights`]: genesis weights (§4.1) and the axon weight `A_pq` (§4.2);
 //! - [`focus`]: the canonical focus graph (§4.3) and the φ*/gradient engine
 //!   seam (§4.4, §5.1) with the integer reference engine;
-//! - [`settle`]: snapshots (§2.4), the three solves and attribution
-//!   (§5.1–§5.4), and the settlement step of a block (§5.5–§5.6);
+//! - [`settle`]: snapshots (§2.4), the solves and attribution (§5.1–§5.4),
+//!   the payout by the swarm (rewards.md §7), and the settlement step of a
+//!   block (§5.5–§5.6);
+//! - [`lottery`]: the games, the verified tickets and the per-player sums
+//!   the settlement pays by (rewards.md §7);
 //! - [`run`]: the off-block-path settlement worker and its caches.
 //!
 //! Integers and fixed point only; nothing here reads a float or a clock.
 
 pub mod focus;
+pub mod lottery;
 pub mod run;
 pub mod vectors;
 pub mod settle;

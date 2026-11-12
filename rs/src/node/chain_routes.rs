@@ -183,7 +183,7 @@ pub(super) fn route(node: &ChainNode, request: Request) -> Result<Response, Erro
             )))
         }
         ("GET", "/") => Ok(Response::text(format!(
-            "soft3 · {} · chain+cybergraph+bbg\nmoniker {}\nheight {}\nGET /status /tip /header/H /block/H /blocks /tx/ID /nonce/N /balance/N /balances/N /mempool /peers /checkpoints /template?to=N /v2/history /economy /epoch/E /epochs /focus /focus/P /card/C /cards/N\nPOST /tx /submit /checkpoints/revert\n",
+            "soft3 · {} · chain+cybergraph+bbg\nmoniker {}\nheight {}\nGET /status /tip /header/H /block/H /blocks /tx/ID /nonce/N /balance/N /balances/N /mempool /peers /checkpoints /template?to=N /game/B /v2/history /economy /epoch/E /epoch/E/lottery /epochs /focus /focus/P /card/C /cards/N\nPOST /tx /submit /checkpoints/revert\n",
             node.chain_name, node.moniker, node.chain.tip().height,
         ))),
         // chain-wire §7: the kernel renders the answer
@@ -228,6 +228,11 @@ pub(super) fn route(node: &ChainNode, request: Request) -> Result<Response, Erro
             Ok(json(serde_json::json!({
                 "txid": hex(&id), "kind": kind_name(&entry.tx), "tx": tx_fields(&entry.tx), "height": "mempool", "block": null, "index": null,
             })))
+        }
+        // chain-economy §11 amended: the lottery's estimate of an epoch (rewards.md §7)
+        ("GET", p) if p.starts_with("/epoch/") && p.ends_with("/lottery") => {
+            let e: u64 = p["/epoch/".len()..p.len() - "/lottery".len()].parse().map_err(|_| Error::bad("epoch is a number"))?;
+            node.kernel.economy(|c| c.lottery_json(e)).map(json).ok_or_else(|| not_found("lottery_not_held", format!("epoch {e} is not settled on this chain, or this node holds no estimate of it")))
         }
         // chain-economy §11
         ("GET", p) if p.starts_with("/epoch/") => {
@@ -311,7 +316,7 @@ pub(super) fn route(node: &ChainNode, request: Request) -> Result<Response, Erro
         ("GET", "/template") => {
             let to = query(q, "to")?.and_then(|t| unhex32(&t)).ok_or_else(|| Error::bad("to=<64 hex neuron> required"))?;
             let txs = node.mempool.lock().expect("mempool").template_txs();
-            let (header, body) = node.chain.template(&to, &txs, crate::chain::net::now_unix()).map_err(|e| error("503 Service Unavailable", "no_template", e))?;
+            let (header, body, game) = node.chain.template(&to, &txs, crate::chain::net::now_unix()).map_err(|e| error("503 Service Unavailable", "no_template", e))?;
             let mut templates = node.templates.lock().expect("templates");
             templates.retain(|(_, h, _)| h.prev == header.prev);
             templates.push((header.id(), header, body.clone()));
@@ -319,7 +324,13 @@ pub(super) fn route(node: &ChainNode, request: Request) -> Result<Response, Erro
                 templates.remove(0);
             }
             node.last_template.store(crate::chain::net::now_unix(), Ordering::Relaxed);
-            Ok(Response::bytes("application/json", format!("{}\n", node.chain.template_json(&header, &body, 0)).into_bytes()))
+            Ok(Response::bytes("application/json", format!("{}\n", node.chain.template_json(&header, &body, &game, 0)).into_bytes()))
+        }
+        // chain-wire §7 amended: the game a template names, for a miner that holds no state
+        ("GET", p) if p.starts_with("/game/") => {
+            let beacon = unhex32(&p["/game/".len()..]).ok_or_else(|| Error::bad("beacon is 64 hex chars"))?;
+            let json_text = node.chain.game_json(&beacon).ok_or_else(|| not_found("no_game", "no game closed by that boundary on this node".into()))?;
+            Ok(Response::bytes("application/json", format!("{json_text}\n").into_bytes()))
         }
         ("POST", "/submit") => {
             let text = std::str::from_utf8(&request.body).map_err(|_| Error::bad("hex header expected"))?.trim();

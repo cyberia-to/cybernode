@@ -109,6 +109,7 @@ impl Genesis {
             tx_root: self.chain_id,
             state_root,
             chain: self.chain_id,
+            sample: [0; 32],
         }
     }
 }
@@ -159,7 +160,7 @@ pub(crate) mod tests {
         assert_eq!(s.height(), 0);
         let b0 = g.block0(s.root());
         assert_eq!(b0.tx_root, g.chain_id);
-        assert_eq!(b0.encode(), crate::genesis::file::block0_header(0, &b0.state_root, &g.chain_id));
+        assert_eq!(b0.encode(), crate::genesis::file::block0_header(0, b0.bits, &b0.state_root, &g.chain_id));
         assert_eq!(Genesis::decode(&g.bytes).unwrap(), g);
     }
 
@@ -208,14 +209,15 @@ pub(crate) mod tests {
         };
         let g = Genesis::decode(&bytes).unwrap();
         let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
-        assert_eq!(hex(&g.chain_id), "bae85f40d9f508664b5214107551be95d3f188d9585a899178c23e80886720e5");
+        assert_eq!(hex(&g.chain_id), "a94ee10120f2d24009f091eb5f620de0e65f67ef2619073988766d50be566d7f");
+        assert_eq!(g.params().bits, 0x2002_0000, "the file's bits are pussy's GENESIS_BITS, 2^249");
         assert_eq!(g.s0(), 1_099_389_810_279_114_036);
         assert_eq!(g.subsidy(), 10_458_426_657);
         assert_eq!(g.params().time, 1_793_885_820);
         let mut s = g.state();
         let root = s.root();
         assert_eq!(hex(&root), "d48fee478584d248123c63e2ee6c56224f159c7dadbc625f4261f6af49130371");
-        assert_eq!(hex(&g.block0(root).id()), "73208ee2d43fbb0420119ceff23eab79e9d96921050e2a2137d0705c461852d4");
+        assert_eq!(hex(&g.block0(root).id()), "b5aca6a0446c3fd3080dc8cac4a03c3b0bafc41fe9847b9779f19a6faaeb6e06");
         for t in s.tokens() {
             assert_eq!(s.token_sum(&t), s.supply(&t));
         }

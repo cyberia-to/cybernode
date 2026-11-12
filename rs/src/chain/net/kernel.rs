@@ -11,7 +11,7 @@
 //!   bodies a reorganization took off the main chain;
 //! - a txid index of the main chain for `GET /tx/{txid}`.
 //!
-//! Headers and integers cross the boundary as their wire bytes (the 168-byte
+//! Headers and integers cross the boundary as their wire bytes (the 200-byte
 //! header, the 32-byte little-endian u256), so the two codecs can never
 //! silently disagree: a test pins header ids and txids on both sides.
 
@@ -37,11 +37,11 @@ use super::chain_view::{Admitted, BlockError, BlockVerdict, ChainEvent, ChainVie
 use super::codec::{Header, Id, U256};
 
 fn to_kernel(h: &Header) -> KHeader {
-    KHeader::decode_raw(&h.encode()).expect("a header is 168 bytes")
+    KHeader::decode_raw(&h.encode()).expect("a header is 200 bytes")
 }
 
 fn from_kernel(h: &KHeader) -> Header {
-    Header::decode(&h.encode()).expect("a header is 168 bytes")
+    Header::decode(&h.encode()).expect("a header is 200 bytes")
 }
 
 fn wide(w: KU256) -> U256 {
@@ -64,7 +64,7 @@ fn header_error(e: ChainError) -> HeaderError {
         e @ (ChainError::DeepFork { .. } | ChainError::Checkpoint { .. } | ChainError::CheckpointRejected(_)) => HeaderError::Refused(e.to_string()),
         ChainError::Store(s) => HeaderError::Store(s),
         // the callers route these before mapping
-        e @ (ChainError::UnknownParent(_) | ChainError::FutureTime { .. } | ChainError::Block(_)) => HeaderError::Syntax(e.to_string()),
+        e @ (ChainError::UnknownParent(_) | ChainError::FutureTime { .. } | ChainError::Block(_) | ChainError::VerifyBudget | ChainError::Game(_)) => HeaderError::Syntax(e.to_string()),
     }
 }
 
@@ -460,6 +460,11 @@ impl ChainView for KernelChain {
                 Err(BlockError::Held)
             }
             Err(e @ (ChainError::DeepFork { .. } | ChainError::Checkpoint { .. } | ChainError::CheckpointRejected(_))) => Err(BlockError::Refused(e.to_string())),
+            Err(ChainError::Block(e @ crate::chain::apply::BlockError::Sample(_))) => {
+                inner.best = None;
+                Err(BlockError::BadSample(e.to_string()))
+            }
+            Err(e @ (ChainError::VerifyBudget | ChainError::Game(_) | ChainError::Block(crate::chain::apply::BlockError::Settlement { .. }))) => Err(BlockError::Waiting(e.to_string())),
             Err(ChainError::Block(e)) => {
                 // statuses changed (the block and its descendants are invalid)
                 inner.best = None;
@@ -592,13 +597,31 @@ impl ChainView for KernelChain {
         self.lock().chain.tip().header.state_root
     }
 
-    fn template(&self, to: &Id, txs: &[Vec<u8>], now: u64) -> Result<(Header, Vec<u8>), String> {
+    fn template(&self, to: &Id, txs: &[Vec<u8>], now: u64) -> Result<(Header, Vec<u8>, std::sync::Arc<crate::chain::ticket::EpochGame>), String> {
         let t = self.lock().chain.header_template(*to, now, txs).map_err(|e| e.to_string())?;
-        Ok((from_kernel(&t.header), t.body))
+        Ok((from_kernel(&t.header), t.body, t.game))
     }
-    fn template_json(&self, header: &Header, body: &[u8], expires: u64) -> String {
+    fn template_json(&self, header: &Header, body: &[u8], game: &std::sync::Arc<crate::chain::ticket::EpochGame>, expires: u64) -> String {
         let target = kheader::decode_bits(header.bits).unwrap_or(KU256::ZERO);
-        Template { header: to_kernel(header), target, body: body.to_vec(), txids: Vec::new(), fees: 0 }.json(&self.name, expires)
+        Template { header: to_kernel(header), target, body: body.to_vec(), txids: Vec::new(), fees: 0, game: game.clone() }.json(&self.name, expires)
+    }
+    fn game_json(&self, beacon: &Id) -> Option<String> {
+        let mut inner = self.lock();
+        // serve the current game and the previous one only (R18-8)
+        let tip = inner.chain.tip().header.height;
+        let min_epoch = inner.chain.rules().clock.game_of(tip + 1).saturating_sub(1);
+        inner.chain.economy.tickets.game_json(beacon, min_epoch).map(|j| j.to_string())
+    }
+    fn retry_waiting(&self) {
+        let mut inner = self.lock();
+        if inner.chain.budget_spent {
+            let before = inner.chain.tip();
+            let _ = inner.chain.try_advance();
+            inner.best = None;
+            let event = inner.moved(&before);
+            drop(inner);
+            self.emit(event);
+        }
     }
     fn events(&self) -> broadcast::Receiver<ChainEvent> {
         self.events.subscribe()

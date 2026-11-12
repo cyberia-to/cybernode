@@ -21,13 +21,14 @@ use super::super::sigs::{self, neuron_of, token, txid};
 use super::super::state::{Id, StateBackend, Undo};
 use super::super::tx::{Body, Tx};
 use super::focus::{FocusEngine, FocusGraph, Tru};
+use super::lottery::Lottery;
 use super::run::Economy;
 use super::settle::Outcome;
 use super::weights::GenesisWeights;
 use super::{card_id, focus_key, phi_digest};
 
-/// The economy scenarios' clock: L = 10, D = 5, MIN_LOCK = 15.
-pub const CLOCK: EpochClock = EpochClock { length: 10, delay: 5, min_lock: 15 };
+/// The economy scenarios' clock: L = 10, D = 5, MIN_LOCK = 25 (≥ 2L + D).
+pub const CLOCK: EpochClock = EpochClock { length: 10, delay: 5, min_lock: 25 };
 const D_BLOCK: &[u8] = b"soft3/conformance/block/v1\0";
 const FUNDS: u64 = 1_000_000_000_000_000;
 const FEE: u64 = 257;
@@ -104,13 +105,15 @@ impl Driver {
             subsidy: genesis.subsidy(),
             s0: genesis.s0(),
             clock: CLOCK,
+            w_ticket: 2,
+            v_budget: 6,
         };
         let mut state = genesis.state();
         let root = state.root();
         let id0 = genesis.block0(root).id();
-        let mut economy = Economy::new(GenesisWeights::from_file(&genesis.file), engine, CLOCK, None);
+        let mut economy = Economy::new(GenesisWeights::from_file(&genesis.file), engine, CLOCK, None, 2, 1);
         economy.background = false;
-        economy.on_boundary(&state, 0, id0, root, rules.s0, None);
+        economy.on_boundary(&state, 0, id0, root, rules.s0);
         Driver { genesis, rules, state, economy, ids: vec![id0], roots: vec![root], undos: vec![], outcomes: vec![None], keys: keys(), nonces: vec![0; 3] }
     }
 
@@ -170,9 +173,13 @@ impl Driver {
             .chain(txs.iter().cloned())
             .map(|raw| Decoded { tx: Tx::decode(&raw).expect("well-formed"), txid: txid(&self.rules.chain, &raw), raw })
             .collect();
+        // the scenarios carry no headers, so no block has a ticket: every
+        // player is paid its exact gradient (k_c = 0 < K_MIN), the lottery
+        // of each epoch being its game and no tickets
         let settle = self.rules.clock.settles_at(h).and_then(|e| {
-            let (prev, cur) = (self.ids[CLOCK.boundary(e - 1) as usize], self.ids[CLOCK.boundary(e) as usize]);
-            self.economy.result(&prev, &cur)
+            let (prev, cur, end) = (self.ids[CLOCK.boundary(e - 1) as usize], self.ids[CLOCK.boundary(e) as usize], self.ids[CLOCK.boundary(e + 1) as usize]);
+            let game = self.economy.game(&prev, &cur)?.ok()?;
+            self.economy.result(&prev, &cur, &end, || Some(Lottery { game, tickets: Vec::new() }))
         });
         let applied = apply::transition(&self.rules, h, &decoded, &mut self.state, &Locked::default(), settle.as_deref())?;
         let mut buf = D_BLOCK.to_vec();
@@ -186,9 +193,8 @@ impl Driver {
         self.outcomes.push(applied.settled);
         if CLOCK.is_boundary(h) {
             let e = CLOCK.epoch(h);
-            let prev = self.ids[CLOCK.boundary(e - 1) as usize];
             let supply = self.rules.supply_at(h);
-            self.economy.on_boundary(&self.state, e, id, applied.root, supply, Some(prev));
+            self.economy.on_boundary(&self.state, e, id, applied.root, supply);
         }
         Ok(())
     }
@@ -262,40 +268,41 @@ pub fn entries() -> Vec<(String, Id)> {
     let mut d = Driver::new(tru.clone());
     let txs = vec![d.lock(0, boot, pussy, FUNDS / 1_000, 1), d.lock(1, pussy, cyber, FUNDS / 1_000, 0), d.lock(2, pussy, boot, FUNDS / 4_000, -1)];
     d.block(&txs).expect("locks apply");
-    d.empty_to(25);
+    // settle(1) = 25, settle(2) = 35: the window of an epoch's game is the next epoch (rewards.md §7)
+    d.empty_to(35);
     for e in [1u64, 2] {
         let o = d.outcome(CLOCK.settle(e)).clone();
         out.push((format!("two epochs: epoch {e} record"), o.record.digest()));
         out.push((format!("two epochs: epoch {e} payouts"), o.record.payouts));
         out.push((format!("two epochs: epoch {e} budget, paid, pool after"), u64s(&[o.record.budget, o.record.paid, o.record.pool_after])));
     }
-    out.push(("two epochs: state root at 25".into(), d.roots[25]));
+    out.push(("two epochs: state root at 35".into(), d.roots[35]));
     let passive = card_id(&d.neuron(1), &pussy, &cyber);
-    assert!(d.outcome(15).payouts.iter().all(|(c, _, _)| *c != passive), "the passive position earns nothing");
+    assert!(d.outcome(25).payouts.iter().all(|(c, _, _)| *c != passive), "the passive position earns nothing");
 
-    // reorganizations: three blocks above the boundary reproduce epoch 1's
+    // reorganizations: three blocks above the window reproduce epoch 1's
     // record; replacing the boundary block changes it
-    let main = d.outcome(15).record.clone();
+    let main = d.outcome(25).record.clone();
     let mut r = Driver::new(tru.clone());
     let txs = vec![r.lock(0, boot, pussy, FUNDS / 1_000, 1), r.lock(1, pussy, cyber, FUNDS / 1_000, 0), r.lock(2, pussy, boot, FUNDS / 4_000, -1)];
     r.block(&txs).expect("locks apply");
-    r.empty_to(15);
+    r.empty_to(25);
     for _ in 0..3 {
         r.retract();
     }
     let t = r.transfer(0, [0x77; 32], 5);
     r.block(&[t]).expect("a transfer applies");
-    r.empty_to(15);
-    assert_eq!(r.outcome(15).record, main, "a reorg above the boundary reproduces the record");
-    out.push(("reorg above the boundary: epoch 1 record".into(), r.outcome(15).record.digest()));
+    r.empty_to(25);
+    assert_eq!(r.outcome(25).record, main, "a reorg above the window reproduces the record");
+    out.push(("reorg above the boundary: epoch 1 record".into(), r.outcome(25).record.digest()));
     while r.height() > 9 {
         r.retract();
     }
     let extra = r.lock(1, cyber, boot, FUNDS / 2_000, 1);
     r.block(&[extra]).expect("a lock in the new boundary block");
-    r.empty_to(15);
-    assert_ne!(r.outcome(15).record, main, "a new boundary block is a new snapshot");
-    out.push(("reorg of the boundary block: epoch 1 record".into(), r.outcome(15).record.digest()));
+    r.empty_to(25);
+    assert_ne!(r.outcome(25).record, main, "a new boundary block is a new snapshot");
+    out.push(("reorg of the boundary block: epoch 1 record".into(), r.outcome(25).record.digest()));
 
     // the new-high rule: lock, unlock after MIN_LOCK, relock one epoch later
     let mut n = Driver::new(tru.clone());
@@ -308,12 +315,12 @@ pub fn entries() -> Vec<(String, Id)> {
     n.empty_to(30);
     let t = n.lock(0, boot, pussy, amount, 1);
     n.block(&[t]).expect("relock");
-    n.empty_to(45);
+    n.empty_to(55); // settle(4) = boundary(5) + 5
     let card = card_id(&n.neuron(0), &boot, &pussy);
-    let first = n.outcome(15).payouts.iter().find(|x| x.0 == card).map(|x| x.2).unwrap_or(0);
-    let again = n.outcome(45).payouts.iter().find(|x| x.0 == card).map(|x| x.2).unwrap_or(0);
+    let first = n.outcome(25).payouts.iter().find(|x| x.0 == card).map(|x| x.2).unwrap_or(0);
+    let again = n.outcome(55).payouts.iter().find(|x| x.0 == card).map(|x| x.2).unwrap_or(0);
     out.push(("new high: first lock and relock paid".into(), u64s(&[first, again])));
-    out.push(("new high: epoch 4 record".into(), n.outcome(45).record.digest()));
+    out.push(("new high: epoch 4 record".into(), n.outcome(55).record.digest()));
 
     // conservation over 2,000 blocks of random locks, unlocks and payout changes
     let mut c = Driver::new(tru);

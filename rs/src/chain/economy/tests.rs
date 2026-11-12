@@ -132,6 +132,12 @@ fn reference_gradient_agrees_with_a_finite_difference() {
     }
 }
 
+/// The lottery of a settlement with no tickets: every player paid its exact
+/// gradient; the game built on tru's engine (rewards.md §7).
+fn lottery(prev: &super::settle::Snapshot, cur: &super::settle::Snapshot, weights: &super::weights::GenesisWeights) -> super::lottery::Lottery {
+    super::lottery::Lottery { game: std::sync::Arc::new(super::super::ticket::EpochGame::from_snapshots(prev, cur, weights, 2, 1).expect("a game")), tickets: Vec::new() }
+}
+
 #[test]
 fn settle_result_round_trips_through_the_cache_file() {
     use super::settle::{FocusOut, SettleResult};
@@ -150,6 +156,11 @@ fn settle_result_round_trips_through_the_cache_file() {
         earners: vec![Earner { card: [5; 32], owner: [6; 32], x: W([1, 2, 3, 4, 5, 6, 7, 8]), cap: 10 }],
         marks: vec![([7; 32], Mark { pos: 1, neg: 2 })],
         focus: std::sync::Arc::new(FocusOut { particles: vec![], phi: vec![], syntropy: -77, digest: [4; 32] }),
+        value: -5,
+        players: 2,
+        samples: 7,
+        by_mean: 1,
+        lottery: vec![super::lottery::PlayerEstimate { card: [5; 32], side: -1, k: 7, mean: -3, stderr: 2, exact: 1 << 70, a: -3, paid: 0 }],
     };
     assert_eq!(super::run::round_trip(&r), Some(r));
 }
@@ -177,7 +188,7 @@ fn the_new_high_rule_pays_only_above_the_decayed_mark() {
     };
     let e = Reference::default();
     let x_of = |mark: Option<Mark>| -> W {
-        let r = compute(&snap(1, 0, None), &snap(2, 100, mark), &weights, &e, None);
+        let r = compute(&snap(1, 0, None), &snap(2, 100, mark), &weights, &e, None, &lottery(&snap(1, 0, None), &snap(2, 100, mark), &weights));
         r.earners.iter().find(|x| x.card == card).map(|x| x.x).unwrap_or(W::ZERO)
     };
     let fresh = x_of(None);
@@ -191,13 +202,19 @@ fn the_new_high_rule_pays_only_above_the_decayed_mark() {
     // a mark on the other side does not limit this one
     assert_eq!(x_of(Some(Mark { pos: 0, neg: 1_000 })), fresh);
     // the marks the settlement leaves: the new height, decayed from there
-    let r = compute(&snap(1, 0, None), &snap(2, 100, Some(Mark { pos: 250, neg: 0 })), &weights, &e, None);
+    let r = compute(&snap(1, 0, None), &snap(2, 100, Some(Mark { pos: 250, neg: 0 })), &weights, &e, None, &lottery(&snap(1, 0, None), &snap(2, 100, Some(Mark { pos: 250, neg: 0 })), &weights));
     assert_eq!(r.marks, vec![(axon, Mark { pos: decay_mark(250, 100), neg: 0 })]);
     // an axon whose sides are empty and marks spent is dropped
-    let r = compute(&snap(1, 0, None), &snap(2, 0, Some(Mark { pos: 1, neg: 0 })), &weights, &e, None);
+    let r = compute(&snap(1, 0, None), &snap(2, 0, Some(Mark { pos: 1, neg: 0 })), &weights, &e, None, &lottery(&snap(1, 0, None), &snap(2, 0, Some(Mark { pos: 1, neg: 0 })), &weights));
     assert!(r.marks.is_empty());
 }
 
+/// On tru's epoch engine — the one the node settles with and the one the
+/// game's `v(N)` is read on — under the payout rule of rewards.md §7 step 4
+/// (tru#45 final, 2026-11-12): a player under `K_MIN` is paid its exact
+/// path gradient, clipped, rescaled to `v(N)` only when `Σa⁺ > 0` and
+/// `v(N) > 0`, else nothing is paid. The cases that earn are the ones that
+/// concentrate focus on the sink `cc`, the graph's high-φ* particle.
 #[test]
 fn attribution_is_linear_in_stake_and_valence_cancels() {
     use super::settle::{Position, Snapshot, compute};
@@ -213,33 +230,45 @@ fn attribution_is_linear_in_stake_and_valence_cancels() {
         let active = positions.iter().filter(|p| p.valence != 0).map(|p| p.stake).sum();
         Snapshot { epoch, height: epoch * 10, block_id: [epoch as u8; 32], state_root: [0; 32], positions, marks: Default::default(), active, supply: 1_000_000 }
     };
-    let e = Reference::default();
-    // one author with 100, or two with 60 and 40: the same total weight (Sybil-neutral)
-    let one = compute(&snap(1, vec![]), &snap(2, vec![pos(7, 100, 1)]), &weights, &e, None);
-    let two = compute(&snap(1, vec![]), &snap(2, vec![pos(7, 60, 1), pos(8, 40, 1)]), &weights, &e, None);
+    use super::focus::Tru;
+    let e = Tru::new(1);
+    // one author with 100, or two with 60 and 40, into the sink: the same
+    // total weight (Sybil-neutral), and the epoch creates value
+    let one = compute(&snap(1, vec![]), &snap(2, vec![pos(7, 100, 1)]), &weights, &e, None, &lottery(&snap(1, vec![]), &snap(2, vec![pos(7, 100, 1)]), &weights));
+    let two = compute(&snap(1, vec![]), &snap(2, vec![pos(7, 60, 1), pos(8, 40, 1)]), &weights, &e, None, &lottery(&snap(1, vec![]), &snap(2, vec![pos(7, 60, 1), pos(8, 40, 1)]), &weights));
+    assert!(one.value > 0, "+1 into the sink raises syntropy over U: v(N) = {}", one.value);
+    assert_eq!(one.earners.len(), 1, "estimates {:?}", one.lottery);
+    assert_eq!(two.earners.len(), 2, "estimates {:?}", two.lottery);
+    assert_eq!(one.lottery[0].k, 0, "no ticket in the window: paid by the exact gradient");
+    assert_eq!(one.lottery[0].a, one.lottery[0].exact);
+    assert!(one.lottery[0].paid > 0 && one.lottery[0].paid <= one.value, "â ≤ v(N)");
     let sum_two = two.earners.iter().fold(W::ZERO, |acc, x| acc.checked_add(&x.x).unwrap());
     let one_x = one.earners[0].x;
     let (hi, lo) = if one_x > sum_two { (one_x, sum_two) } else { (sum_two, one_x) };
     assert!(hi <= lo.checked_add(&W::from_u64(2)).unwrap(), "split changes only rounding: {one_x:?} vs {sum_two:?}");
     // passive stake moves the graph, earns nothing
-    let passive = compute(&snap(1, vec![]), &snap(2, vec![pos(7, 100, 0)]), &weights, &e, None);
+    let passive = compute(&snap(1, vec![]), &snap(2, vec![pos(7, 100, 0)]), &weights, &e, None, &lottery(&snap(1, vec![]), &snap(2, vec![pos(7, 100, 0)]), &weights));
     assert!(passive.earners.is_empty());
-    assert_ne!(passive.phi, compute(&snap(1, vec![]), &snap(2, vec![]), &weights, &e, None).phi, "passive stake moves φ*");
+    assert_ne!(passive.phi, compute(&snap(1, vec![]), &snap(2, vec![]), &weights, &e, None, &lottery(&snap(1, vec![]), &snap(2, vec![]), &weights)).phi, "passive stake moves φ*");
     // −1 on an axon with no weight does nothing: A is clipped at zero
-    let against = compute(&snap(1, vec![]), &snap(2, vec![pos_on(7, cc, a, 100, -1)]), &weights, &e, None);
+    let against = compute(&snap(1, vec![]), &snap(2, vec![pos_on(7, cc, a, 100, -1)]), &weights, &e, None, &lottery(&snap(1, vec![]), &snap(2, vec![pos_on(7, cc, a, 100, -1)]), &weights));
     assert!(against.earners.is_empty(), "nothing to subtract from: zero gradient");
-    // −1 against a → b (whose weight spreads focus, ∂J/∂A < 0) earns
-    let minus = compute(&snap(1, vec![]), &snap(2, vec![pos_on(7, a, b, 100, -1)]), &weights, &e, None);
-    assert_eq!(minus.earners.len(), 1, "subtracting a spreading edge raises syntropy");
-    // +1 on the same edge earns nothing: its gradient is negative
-    let plus = compute(&snap(1, vec![]), &snap(2, vec![pos_on(7, a, b, 100, 1)]), &weights, &e, None);
-    assert!(plus.earners.is_empty());
-    // +1 and −1 of equal size on one axon (§9 hedging): A is unchanged, the
-    // attributions are opposite; only the side whose a(c) > 0 earns, so the
-    // pair costs twice the capital for one side's credit
-    let hedge = compute(&snap(1, vec![]), &snap(2, vec![pos(7, 100, 1), pos(8, 100, -1)]), &weights, &e, None);
-    assert_eq!(hedge.earners.len(), 1, "{:?}", hedge.earners);
-    assert_eq!(hedge.earners[0].card, card_id(&[7; 32], &b, &cc));
+    // −1 against a → b and +1 on it move the epoch's value in opposite
+    // directions; a position earns iff its exact gradient is positive and
+    // the epoch created value (v(N) > 0) — one rule on one engine
+    let minus = compute(&snap(1, vec![]), &snap(2, vec![pos_on(7, a, b, 100, -1)]), &weights, &e, None, &lottery(&snap(1, vec![]), &snap(2, vec![pos_on(7, a, b, 100, -1)]), &weights));
+    let plus = compute(&snap(1, vec![]), &snap(2, vec![pos_on(7, a, b, 100, 1)]), &weights, &e, None, &lottery(&snap(1, vec![]), &snap(2, vec![pos_on(7, a, b, 100, 1)]), &weights));
+    assert!(minus.value.signum() != plus.value.signum() || minus.value == 0, "v(N): −1 {} vs +1 {}", minus.value, plus.value);
+    for (r, name) in [(&minus, "−1 on a → b"), (&plus, "+1 on a → b")] {
+        let earns = r.value > 0 && r.lottery[0].exact > 0;
+        assert_eq!(r.earners.len(), usize::from(earns), "{name}: v(N) = {}, estimates {:?}", r.value, r.lottery);
+    }
+    // +1 and −1 of equal size on one axon (§9 hedging): A is unchanged, so
+    // v(N) = 0 and nothing is paid — the pair costs twice the capital for
+    // no credit (rewards.md §7: nothing is paid when v(N) ≤ 0)
+    let hedge = compute(&snap(1, vec![]), &snap(2, vec![pos(7, 100, 1), pos(8, 100, -1)]), &weights, &e, None, &lottery(&snap(1, vec![]), &snap(2, vec![pos(7, 100, 1), pos(8, 100, -1)]), &weights));
+    assert_eq!(hedge.value, 0, "A is unchanged");
+    assert!(hedge.earners.is_empty(), "{:?}", hedge.earners);
 }
 
 
@@ -303,8 +332,8 @@ fn quadrature_is_a_parameter_and_one_node_is_the_midpoint() {
         v
     };
     let e = Tru::new(2);
-    let one = compute_with(&snap(1, vec![]), &snap(2, positions.clone()), &weights, &e, None, 1);
-    let two = compute_with(&snap(1, vec![]), &snap(2, positions.clone()), &weights, &e, None, 2);
+    let one = compute_with(&snap(1, vec![]), &snap(2, positions.clone()), &weights, &e, None, 1, &lottery(&snap(1, vec![]), &snap(2, positions.clone()), &weights));
+    let two = compute_with(&snap(1, vec![]), &snap(2, positions.clone()), &weights, &e, None, 2, &lottery(&snap(1, vec![]), &snap(2, positions.clone()), &weights));
     assert!(!one.earners.is_empty());
     assert_eq!(one.phi, two.phi, "φ*_E does not depend on the quadrature");
     // the two rules agree on who earns for most positions on a smooth path
@@ -377,7 +406,7 @@ fn settlement_cost_on_genesis_files() {
             let f0 = e.focus(&FocusGraph::build(&prev.adjacency(&weights)));
             let phi0 = t.elapsed();
             let t = Instant::now();
-            let r = compute(&prev, &cur, &weights, &e, Some(f0.syntropy));
+            let r = compute(&prev, &cur, &weights, &e, Some(f0.syntropy), &lottery(&prev, &cur, &weights));
             let settle = t.elapsed();
             eprintln!(
                 "{chain} threads {th}: φ*_0 {phi0:?} (digest {}, J {}), settlement (φ*_E + gradient at A_mid + attribution) {settle:?}: {} particles, {} axons, {} earners",
@@ -389,4 +418,62 @@ fn settlement_cost_on_genesis_files() {
             );
         }
     }
+}
+
+/// The payout by the sampled mean (rewards.md §7 step 4, `k_c ≥ K_MIN`),
+/// against a known expected value (R18-16). Two players on the sink edge
+/// b → cc; `W_TICKET = 2`, so every ticket carries one marginal; 4·K_MIN
+/// tickets with the rank alternating cover each player well over K_MIN
+/// times (the rank picks a position of the drawn ordering, so the split is
+/// a coin flip per ticket). The mean of a player's sampled marginals is its Shapley value —
+/// for two players exactly the average of the two orderings' marginals,
+/// which `Game::shapley` enumerates — so `a(c)` is the mean (not the exact
+/// gradient), the shares are rescaled to `v(N)`, floored, and the dust is
+/// the pool's.
+#[test]
+fn settlement_pays_by_the_sampled_mean_at_k_min() {
+    use super::focus::Tru;
+    use super::lottery::Lottery;
+    use super::settle::{Position, Snapshot, compute};
+    use super::weights::GenesisWeights;
+    use crate::chain::params::K_MIN;
+    use crate::chain::ticket::EpochGame;
+    use std::sync::Arc;
+    let (a, b, cc) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+    let weights = GenesisWeights { axons: vec![(a, b, 1_000), (b, cc, 1_000)], total: 2_000, at_floor: 0 };
+    let axon = axon_of(&b, &cc);
+    let pos = |author: u8, stake: u64| Position { card: card_id(&[author; 32], &b, &cc), axon, p: b, q: cc, owner: [author; 32], valence: 1, stake };
+    let snap = |epoch: u64, positions: Vec<Position>| {
+        let mut positions = positions;
+        positions.sort_by(|x, y| x.card.cmp(&y.card));
+        let active = positions.iter().map(|p| p.stake).sum();
+        Snapshot { epoch, height: epoch * 10, block_id: [epoch as u8; 32], state_root: [0; 32], positions, marks: Default::default(), active, supply: 1_000_000 }
+    };
+    let (prev, cur) = (snap(1, vec![]), snap(2, vec![pos(7, 60), pos(8, 40)]));
+    let game = Arc::new(EpochGame::from_snapshots(&prev, &cur, &weights, 2, 1).unwrap());
+    assert_eq!(game.players.len(), 2);
+    let value = game.value_of_all();
+    assert!(value > 0, "two locks into the sink raise syntropy: v(N) = {value}");
+    // 2·K_MIN tickets: nonce n, rank n mod 2 — each ticket's one marginal is
+    // the rank-r player's along π(n), so each player is covered ≥ K_MIN times
+    let tickets: Vec<Arc<_>> = (0..4 * K_MIN as u64).map(|n| Arc::new(game.ticket_at(n, n % 2, 1))).collect();
+    let lottery = Lottery { game: game.clone(), tickets };
+    let r = compute(&prev, &cur, &weights, &Tru::new(1), None, &lottery);
+    let shapley = game.game().shapley();
+    assert_eq!(r.by_mean, 2, "both players reached K_MIN: {:?}", r.lottery.iter().map(|e| e.k).collect::<Vec<_>>());
+    let mut paid_sum = 0i128;
+    for (i, e) in r.lottery.iter().enumerate() {
+        assert!(e.k as usize >= K_MIN, "player {i}: k = {}", e.k);
+        assert_eq!(e.a, e.mean, "paid by the mean, not the exact gradient");
+        // a two-player ordering sample is exact: the mean over the window is
+        // the Shapley value up to the integer rounding of the mean itself
+        let diff = (e.mean - shapley[i]).abs();
+        assert!(diff <= 1 + shapley[i].abs() / 1_000, "player {i}: mean {} vs Shapley {}", e.mean, shapley[i]);
+        assert!(e.paid >= 0 && e.paid <= value);
+        paid_sum += e.paid;
+    }
+    // the rescale to v(N): Σ â ≤ v(N), every share floored, the dust the pool's
+    assert!(paid_sum <= value && value - paid_sum < 2, "Σ paid {paid_sum}, v(N) {value}, dust {}", value - paid_sum);
+    assert_eq!(r.value, value);
+    assert_eq!(r.samples, 4 * K_MIN as u32);
 }

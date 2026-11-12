@@ -55,8 +55,9 @@ node_cmd=("$bin" node --chain "$SOFT3_CHAIN" --home "$root/state/$chain" --bind 
 
 mine_cmd=()
 if [[ -n "${SOFT3_MINE_ADDRESS:-}" ]]; then
-  mine_cmd=("$bin" mine --node "http://$SOFT3_BIND" --chain "$SOFT3_CHAIN" --address "$SOFT3_MINE_ADDRESS" --backend cpu)
-  [[ -n "${SOFT3_MINE_THREADS:-}" ]] && mine_cmd+=(--threads "$SOFT3_MINE_THREADS")
+  # the miner has no backend — an attempt is a settlement ticket (rewards.md §7)
+  mine_cmd=("$bin" mine --node "http://$SOFT3_BIND" --chain "$SOFT3_CHAIN" --address "$SOFT3_MINE_ADDRESS")
+  [[ -n "${SOFT3_MINE_THREADS:-}" ]] && mine_cmd+=(--workers "$SOFT3_MINE_THREADS")
 fi
 
 # supervise <name> <pidfile> <logfile> cmd... — restart loop with the systemd burst limit

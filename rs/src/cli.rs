@@ -339,26 +339,21 @@ fn cmd_node(args: &[String]) {
 /// Parsed `cybernode mine` flags.
 #[derive(Debug, PartialEq, Eq)]
 struct MineArgs {
-    bench: bool,
     chain: String,
     node: Option<String>,
     address: Option<String>,
-    backend: String,
-    threads: usize,
-    seconds: u64,
+    /// attempt threads (0: every core)
+    workers: usize,
     help: bool,
 }
 
 /// Parse `cybernode mine`'s argv. Pure: every error is returned.
 fn parse_mine_args(args: &[String]) -> Result<MineArgs, NodeArgError> {
     let mut a = MineArgs {
-        bench: false,
         chain: "pussy".into(),
         node: None,
         address: None,
-        backend: "auto".into(),
-        threads: 0,
-        seconds: 5,
+        workers: 0,
         help: false,
     };
     let mut i = 0;
@@ -367,7 +362,6 @@ fn parse_mine_args(args: &[String]) -> Result<MineArgs, NodeArgError> {
     };
     while i < args.len() {
         match args[i].as_str() {
-            "bench" if i == 0 => a.bench = true,
             "--chain" => {
                 i += 1;
                 a.chain = value(args, i, "--chain needs pussy|bostrom")?;
@@ -380,21 +374,11 @@ fn parse_mine_args(args: &[String]) -> Result<MineArgs, NodeArgError> {
                 i += 1;
                 a.address = Some(value(args, i, "--address needs a neuron (64 hex)")?);
             }
-            "--backend" => {
+            "--workers" | "--threads" => {
                 i += 1;
-                a.backend = value(args, i, "--backend needs auto|cpu|metal|webgpu")?;
-            }
-            "--threads" => {
-                i += 1;
-                a.threads = value(args, i, "--threads needs a number")?
+                a.workers = value(args, i, "--workers needs a number")?
                     .parse()
-                    .map_err(|_| NodeArgError::Unknown("--threads: not a number".into()))?;
-            }
-            "--seconds" => {
-                i += 1;
-                a.seconds = value(args, i, "--seconds needs a number")?
-                    .parse()
-                    .map_err(|_| NodeArgError::Unknown("--seconds: not a number".into()))?;
+                    .map_err(|_| NodeArgError::Unknown("--workers: not a number".into()))?;
             }
             "-h" | "--help" => a.help = true,
             other => return Err(NodeArgError::Unknown(other.to_string())),
@@ -430,57 +414,19 @@ fn cmd_mine(args: &[String]) {
         }
     };
     if a.help {
-        println!("cybernode mine — reference miner of the phase-1 root chain (specs/chain.md)");
+        println!("cybernode mine — reference miner of the phase-1 root chain (specs/chain.md, tru specs/rewards.md §7)");
         println!();
-        println!("  cybernode mine --address NEURON [--chain pussy|bostrom] [--node URL]");
-        println!("             [--backend auto|cpu|metal|webgpu] [--threads N]");
-        println!(
-            "  cybernode mine bench [--backend auto|cpu|metal|webgpu] [--threads N] [--seconds S]"
-        );
+        println!("  cybernode mine --address NEURON [--chain pussy|bostrom] [--node URL] [--workers N]");
         println!();
-        println!(
-            "grinds hemera(header) < target over the 16-byte nonce; GET /template, POST /submit"
-        );
-        println!("(chain-wire §7); the template is refreshed when GET /tip moves.");
+        println!("every attempt is a settlement ticket: the sample of the epoch's game on the");
+        println!("template (W_TICKET + 1 solves of the epoch engine), committed in the header,");
+        println!("hemera(header) < target; GET /template + GET /game + POST /submit (chain-wire §7);");
+        println!("the template is refreshed when GET /tip moves. Nothing else is ground: no GPU.");
         println!();
         println!("defaults:");
         println!("  --chain    pussy");
         println!("  --node     http://127.0.0.1:7781 (pussy) · :7782 (bostrom)");
-        println!("  --backend  auto (metal, else webgpu, else cpu)");
-        println!("  --threads  every core (cpu)");
-        println!("  --seconds  5 (bench)");
-        return;
-    }
-    let choice: mine::Choice = match a.backend.parse() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(2);
-        }
-    };
-    if a.bench {
-        let backends = match choice {
-            mine::Choice::Auto => mine::all(a.threads),
-            c => match mine::select(c, a.threads) {
-                Ok(b) => vec![b],
-                Err(e) => {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                }
-            },
-        };
-        let mut rows = Vec::new();
-        for b in &backends {
-            eprintln!("measuring {} for {}s…", b.name(), a.seconds);
-            match mine::bench::measure(b.as_ref(), a.seconds as f64) {
-                Ok(r) => rows.push(r),
-                Err(e) => eprintln!("{}: {e}", b.name()),
-            }
-        }
-        print!("{}", mine::bench::table(&rows));
-        if rows.iter().any(|r| !r.vector) {
-            std::process::exit(1);
-        }
+        println!("  --workers  every core (attempt threads; a solve uses the cores a ticket leaves)");
         return;
     }
     let Some(address) = a.address else {
@@ -498,23 +444,17 @@ fn cmd_mine(args: &[String]) {
         );
         std::process::exit(2);
     };
-    let backend = match mine::select(choice, a.threads) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    };
-    let settings = mine::run::Settings {
+    let settings = mine::Settings {
         chain: a.chain,
         node,
         address: address.to_lowercase(),
+        workers: a.workers,
         tip_poll: std::time::Duration::from_secs(2),
-        refresh: std::time::Duration::from_secs(30),
-        report: std::time::Duration::from_secs(5),
+        refresh: std::time::Duration::from_secs(120),
+        report: std::time::Duration::from_secs(10),
     };
     let stop = std::sync::atomic::AtomicBool::new(false);
-    if let Err(e) = mine::run::run(backend.as_ref(), &settings, &stop, &|m| println!("{m}")) {
+    if let Err(e) = mine::run(&settings, &stop, &|m| println!("{m}")) {
         eprintln!("cybernode mine failed: {e}");
         std::process::exit(1);
     }
@@ -706,9 +646,7 @@ fn print_help() {
     println!("  cybernode status              # alias of sync");
     println!("  cybernode network [name]      # print endpoints");
     println!("  cybernode node [--home DIR] [--bind HOST:PORT] [--moniker NAME]");
-    println!("  cybernode mine --address NEURON [--chain pussy|bostrom] [--node URL]");
-    println!("             [--backend auto|cpu|metal|webgpu] [--threads N]");
-    println!("  cybernode mine bench [--backend ...] [--threads N] [--seconds S]");
+    println!("  cybernode mine --address NEURON [--chain pussy|bostrom] [--node URL] [--workers N]");
     println!("  cybernode node --chain <pussy|bostrom|dev> --home DIR --bind HOST:PORT --radio HOST:UDP --peers FILE --moniker NAME");
     println!("  cybernode node id --home DIR");
     println!("  cybernode chain genesis-dev|key|tx|revert-sign …   # dev helpers; revert-sign signs the owner's revert statement");
@@ -858,22 +796,10 @@ mod tests {
     fn mine_args_parse() {
         let a = parse_mine_args(&[]).ok().unwrap();
         assert_eq!(a.chain, "pussy");
-        assert_eq!(a.backend, "auto");
-        assert!(!a.bench);
-        let args: Vec<String> = [
-            "bench",
-            "--backend",
-            "cpu",
-            "--threads",
-            "3",
-            "--seconds",
-            "2",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        assert_eq!(a.workers, 0);
+        let args: Vec<String> = ["--workers", "3", "--chain", "bostrom"].iter().map(|s| s.to_string()).collect();
         let a = parse_mine_args(&args).ok().unwrap();
-        assert!(a.bench && a.backend == "cpu" && a.threads == 3 && a.seconds == 2);
+        assert!(a.workers == 3 && a.chain == "bostrom");
         let args: Vec<String> = ["--address"].iter().map(|s| s.to_string()).collect();
         assert!(matches!(
             parse_mine_args(&args),

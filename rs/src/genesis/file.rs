@@ -19,8 +19,15 @@ use crate::chain::pool::{POOL_BYTES, Pool};
 
 pub const DIALECT: &str = "urn:cyberia:chain-genesis:1";
 pub const VERSION: u32 = 1;
-pub const GENESIS_BITS: u32 = 0x1e01_0000;
 pub const CHECKPOINT_SUNSET: u64 = 525_600;
+
+/// `GENESIS_BITS` of a chain (chain.md §0 amended 2026-11-04, tru
+/// rewards.md §7 "Difficulty"): pussy `0x20020000` (2^249), bostrom the
+/// floor `0x20100000` (2^252); any other name pussy's. The file carries it
+/// as `params.bits`, the ASERT anchor of chain.md §1.5.
+pub fn genesis_bits(chain: &str) -> u32 {
+    crate::chain::params::genesis_bits(chain)
+}
 /// `BLOCKS_PER_YEAR / 1 %` — `SUBSIDY = floor(S0 / SUBSIDY_DIVISOR)` (chain.md §3.5).
 pub const SUBSIDY_DIVISOR: u128 = 105_120_000;
 
@@ -273,27 +280,31 @@ pub fn subsidy_of(s0: u128) -> io::Result<u64> {
     u64::try_from(s0 / SUBSIDY_DIVISOR).map_err(|_| invalid("subsidy does not fit u64"))
 }
 
-/// The 168-byte block-0 header of chain.md §1.1/§4.3 and its id.
-pub fn block0_header(time: u64, state_root: &Id, chain: &Id) -> [u8; 168] {
-    let mut h = [0u8; 168];
+/// The 200-byte block-0 header of chain.md §1.1/§4.3 and its id: `bits` is
+/// the file's `params.bits` (the chain's `GENESIS_BITS`); block 0 is not
+/// mined, so its sample is zero.
+pub fn block0_header(time: u64, bits: u32, state_root: &Id, chain: &Id) -> [u8; 200] {
+    let mut h = [0u8; 200];
     h[0..4].copy_from_slice(&VERSION.to_le_bytes());
     // height 0, time
     h[12..20].copy_from_slice(&time.to_le_bytes());
-    h[20..24].copy_from_slice(&GENESIS_BITS.to_le_bytes());
+    h[20..24].copy_from_slice(&bits.to_le_bytes());
     // nonce 0, prev 0
     h[72..104].copy_from_slice(chain); // tx_root = chain for genesis
     h[104..136].copy_from_slice(state_root);
     h[136..168].copy_from_slice(chain);
+    // sample: zero, block 0 is not mined
     h
 }
 
-/// `block_id = hemera(header_bytes)`.
-pub fn block_id(header: &[u8; 168]) -> Id {
+/// `block_id = hemera(header_bytes)` over the 200 bytes.
+pub fn block_id(header: &[u8; 200]) -> Id {
     *hemera::hash(header).as_bytes()
 }
 
 /// Generic header encoder (for the conformance vector test).
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub fn header_bytes(
     version: u32,
     height: u64,
@@ -304,8 +315,9 @@ pub fn header_bytes(
     tx_root: &Id,
     state_root: &Id,
     chain: &Id,
-) -> [u8; 168] {
-    let mut h = [0u8; 168];
+    sample: &Id,
+) -> [u8; 200] {
+    let mut h = [0u8; 200];
     h[0..4].copy_from_slice(&version.to_le_bytes());
     h[4..12].copy_from_slice(&height.to_le_bytes());
     h[12..20].copy_from_slice(&time.to_le_bytes());
@@ -315,5 +327,6 @@ pub fn header_bytes(
     h[72..104].copy_from_slice(tx_root);
     h[104..136].copy_from_slice(state_root);
     h[136..168].copy_from_slice(chain);
+    h[168..200].copy_from_slice(sample);
     h
 }

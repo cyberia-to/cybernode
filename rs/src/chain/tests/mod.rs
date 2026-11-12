@@ -3,6 +3,7 @@
 
 mod corpus;
 mod economy;
+mod flood;
 mod forks;
 mod revert;
 mod rules;
@@ -71,6 +72,15 @@ impl Net {
     }
 
     fn with_funds_named(accounts: u8, funds: u64, name: &str) -> Net {
+        Net::with_funds_links(accounts, funds, name, &[([1; 32], [2; 32])])
+    }
+
+    /// As [`Net::with_funds_named`] with a chosen genesis edge set (author
+    /// `neurons[0]`) — the base graph the economy settles over. A chain
+    /// a → b → c (particles 1, 2, 3) gives a high-φ* sink (3) a lock can
+    /// concentrate onto, so an epoch's `v(N) > 0` (rewards.md §7 step 4); the
+    /// default is one edge 1 → 2.
+    pub fn with_funds_links(accounts: u8, funds: u64, name: &str, edges: &[(Id, Id)]) -> Net {
         test_pow::relax();
         let keys: Vec<_> = (0..accounts).map(key).collect();
         let neurons: Vec<Id> = keys.iter().map(|k| neuron_of(&pubkey(k))).collect();
@@ -96,7 +106,7 @@ impl Net {
                 pool: super::pool::Pool::genesis(),
             },
             balances,
-            links: vec![Link { neuron: neurons[0], p: [1; 32], q: [2; 32], height: 7 }],
+            links: edges.iter().map(|(p, q)| Link { neuron: neurons[0], p: *p, q: *q, height: 7 }).collect(),
         };
         Net {
             genesis: Genesis::from_file(&file).unwrap(),
@@ -214,10 +224,12 @@ impl Drop for Net {
     }
 }
 
-/// Nonce search from 0 at the template's target (about two hashes).
-pub fn solve(mut header: Header) -> Header {
+/// Nonce search from 0 at the template's target (about two attempts), each
+/// attempt the ticket of the template on `game` (rewards.md §7).
+pub fn solve_on(game: &super::ticket::EpochGame, mut header: Header) -> Header {
     for n in 0u128.. {
         header.nonce = n.to_le_bytes();
+        game.solve(&mut header, 2);
         if valid_pow(&header) {
             return header;
         }
@@ -225,8 +237,19 @@ pub fn solve(mut header: Header) -> Header {
     unreachable!()
 }
 
+/// [`solve_on`] with the template's own game.
+pub fn solve(t: &Template, header: Header) -> Header {
+    solve_on(&t.game, header)
+}
+
+/// The game the next block on `chain`'s tip samples.
+pub fn game_of(chain: &mut Chain, height: u64) -> std::sync::Arc<super::ticket::EpochGame> {
+    let parent = chain.header_at(height - 1).expect("a parent").id();
+    chain.game_for(&parent, height).expect("the game of the next block")
+}
+
 pub fn block_of(t: &Template) -> Block {
-    Block { header: solve(t.header), body: t.body.clone() }
+    Block { header: solve(t, t.header), body: t.body.clone() }
 }
 
 /// Mine on the tip: template at `time` (0 = parent + 30) with `txs`, solve, accept.

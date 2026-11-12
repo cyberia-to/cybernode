@@ -46,6 +46,9 @@ pub(crate) async fn run(inner: Arc<Inner>, mut rx: mpsc::Receiver<Hint>) {
                 preferred = Some(p);
             }
         }
+        // blocks that waited on the verification budget or a missing game
+        // (chain.md §5.5 step 8): retried every tick, peers or none
+        inner.chain.retry_waiting();
         if inner.isolated.load(Ordering::Relaxed) {
             continue;
         }
@@ -84,6 +87,9 @@ async fn pass(inner: &Arc<Inner>, preferred: Option<EndpointId>, refresh: bool) 
             break;
         }
     }
+    // no catch-up exemption from V_BUDGET (R18-14, tru#45 §7): the budget
+    // counts branch attempts, and a branch walked from the verified tip
+    // continues for free, which is what makes initial download full speed
     body_sync(inner).await;
     let tip = inner.chain.tip();
     let best = inner.chain.best_header();
@@ -282,7 +288,7 @@ pub(crate) async fn body_sync(inner: &Arc<Inner>) {
             match inner.chain.accept_block(&header, &body, now_unix()) {
                 // NeedBodies: stored; the next round's missing list carries the gap
                 Ok(BlockVerdict::NewTip) | Ok(BlockVerdict::Stored) | Ok(BlockVerdict::Known) | Ok(BlockVerdict::NeedBodies(_)) => applied += 1,
-                Err(e @ (BlockError::Held | BlockError::Refused(_) | BlockError::Store(_) | BlockError::UnknownParent)) => {
+                Err(e @ (BlockError::Held | BlockError::Waiting(_) | BlockError::Refused(_) | BlockError::Store(_) | BlockError::UnknownParent)) => {
                     inner.say(&format!("block {height}: {e}"));
                     return;
                 }

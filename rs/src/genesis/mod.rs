@@ -252,7 +252,7 @@ pub fn build(chain: Chain, snapshot: &Path, out: &Path, options: &Options) -> io
         if blocked.is_empty() {
             let root = bbg.root();
             report.root_seconds = Some(started.elapsed().as_secs());
-            let header = file::block0_header(time, &root, &particle);
+            let header = file::block0_header(time, derived.file.params.bits, &root, &particle);
             report.state_root = Some(hex(&root));
             report.block0_id = Some(hex(&file::block_id(&header)));
         } else {
@@ -328,7 +328,7 @@ pub fn verify(path: &Path, root: bool) -> io::Result<Verified> {
         let blocked = state::over_limit(&bbg);
         if blocked.is_empty() {
             let r = bbg.root();
-            let header = file::block0_header(file.params.time, &r, &particle);
+            let header = file::block0_header(file.params.time, file.params.bits, &r, &particle);
             v.state_root = Some(hex(&r));
             v.block0_id = Some(hex(&file::block_id(&header)));
         } else {

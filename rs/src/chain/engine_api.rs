@@ -126,7 +126,13 @@ impl ChainApi for Chain {
                 return Err(e);
             }
         };
+        // bound the unverified set above the tip against a forged-header
+        // flood (R18-5, R18-15): at the cap the lowest-chainwork entry is
+        // evicted to make room, stale body-less headers first, so an honest
+        // header is always admitted and the store never grows past the cap
+        self.evict_unverified();
         self.store.put_header(*header, work, store::Status::Header).map_err(ChainError::Store)?;
+        self.arrivals.insert(id, std::time::Instant::now());
         self.heaviest = self.heaviest.max(work);
         Ok(HeaderVerdict::Accepted)
     }
@@ -149,16 +155,17 @@ impl ChainApi for Chain {
             };
             self.store.put_body(&id, &block.body).map_err(ChainError::Store)?;
             self.store.set_status(&id, store::Status::Body).map_err(ChainError::Store)?;
-            if block.header.prev == self.tip_id() {
-                self.extend(&block.header, &txs)?;
-                self.after_tip_move()?;
-                let _ = self.try_advance();
-                return Ok(BlockVerdict::Extended);
-            }
+            // a block on the tip is not applied here: every branch of the tip
+            // goes through `try_advance`'s walker, which orders the branches
+            // by the node's local draw alone (R18-14, tru#45 §7)
+            let _ = txs;
         }
         match self.try_advance() {
             Ok(BlockVerdict::Known) if stored_new => Ok(BlockVerdict::Stored),
             Ok(v) => Ok(v),
+            // a spent budget is the node's condition: the block is stored and
+            // waits (the net maps it to `Waiting`, never a score)
+            Err(e @ ChainError::VerifyBudget) => Err(e),
             // a blocked candidate elsewhere is not this block's fault: only
             // report the error when this block's own chain is the blocked one
             Err(e) if self.own_chain_blocked(&id) => Err(e),

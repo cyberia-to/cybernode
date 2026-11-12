@@ -209,6 +209,7 @@ pub fn header_template(chain: &mut Chain, to: Id, time: u64, mempool: &[Vec<u8>]
     let applied = apply::transition(&rules, height, &txs, chain.state_mut(), &locked, settle.as_deref()).map_err(ChainError::Block)?;
     let state_root = applied.root;
     chain.state_mut().revert(&applied.undo);
+    let game = chain.game_for(&parent.id(), height)?;
 
     let bits = chain.bits_after(&parent);
     let header = Header {
@@ -221,6 +222,7 @@ pub fn header_template(chain: &mut Chain, to: Id, time: u64, mempool: &[Vec<u8>]
         tx_root: tx_root(&raws),
         state_root,
         chain: rules.chain,
+        sample: [0; 32],
     };
-    Ok(Template { header, target: super::header::decode_bits(bits).expect("ASERT output is canonical"), body: tx::join_body(&raws), txids: txs.iter().map(|d| d.txid).collect(), fees })
+    Ok(Template { header, target: super::header::decode_bits(bits).expect("ASERT output is canonical"), body: tx::join_body(&raws), txids: txs.iter().map(|d| d.txid).collect(), fees, game })
 }

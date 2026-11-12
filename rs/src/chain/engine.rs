@@ -6,21 +6,24 @@
 //! [`super::engine_api`]; mempool and template entry points in
 //! [`super::engine_tx`].
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::api::{BlockVerdict, ChainError, Event};
 use super::apply::{self, Decoded, Locked, Rules};
 use super::bbg_state::BbgBacked;
 use super::daa::{median_time_past, next_bits, next_bits_reverted};
 use super::economy::focus::{FocusEngine, Tru};
+use super::economy::lottery::Lottery;
 use super::economy::run::Economy;
 use super::economy::settle::SettleResult;
 use super::economy::weights::GenesisWeights;
 use super::genesis::Genesis;
-use super::header::{BlockId, Header, HeaderError, decode_bits};
-use super::params::{CHAINS, COINBASE_MATURITY, EpochClock, FINALITY_DEPTH, MAX_FUTURE_DRIFT, MTP_WINDOW, REVERTS, RULE_SET};
+use super::header::{BlockId, Header, HeaderError, decode_bits, hash32};
+use super::params::{BLOCK_TIME, CHAINS, COINBASE_MATURITY, EpochClock, FINALITY_DEPTH, MAX_FUTURE_DRIFT, MTP_WINDOW, REVERTS, RULE_SET, v_budget, w_ticket};
+use super::ticket::EpochGame;
 use super::pow::{chainwork, valid_pow};
 use super::revert::{self, RevertEntry, RevertTable, Reverted};
 use super::revert_statement::{self, RevertStatement, StatementError, StatementSet};
@@ -76,10 +79,46 @@ pub struct Chain {
     /// transactions of the main-chain blocks a revert retracted at open, in
     /// original block order, coinbases skipped; taken by the mempool
     pub(super) retracted_txs: Vec<Vec<u8>>,
+    /// the instants of the full sample verifications of the last block
+    /// interval: `V_BUDGET` of them per interval (chain.md §5.5 step 8)
+    pub(super) verifications: VecDeque<Instant>,
+    /// the node's own draw for ties among unverified candidates of equal
+    /// chainwork (rewards.md §7 "Verification"): local, never consensus
+    pub(super) tie_salt: [u8; 32],
+    /// a block waits here when the budget is spent; retried by `try_advance`
+    pub(super) budget_spent: bool,
+    /// `V_BUDGET` governs only gossip-delivered headers competing at the
+    /// tip (rewards.md §7 "Verification"); replay from disk and initial
+    /// block download verify at full speed, so a node without `tickets/`
+    /// opens and a node days behind catches up. `false` during replay and
+    /// while the net reports it is catching up (chain-wire §3).
+    pub(super) budget_on: bool,
+    /// when each unverified header arrived (R18-15: a header without a body
+    /// for longer than one interval is evicted); dropped on verify or evict
+    pub(super) arrivals: HashMap<BlockId, Instant>,
+    /// the node's measured verification time, an EMA in milliseconds of
+    /// its last full recomputations (R18-4): `V_BUDGET = ⌊0.5·T / t_verify⌋`
+    /// follows it, floor 1; seeded from the chain's nominal budget
+    pub(super) verify_ema_ms: u64,
+    /// a pinned budget (tests only); `None` follows the EMA
+    pub(super) v_budget_pinned: Option<usize>,
+    /// the block the verifier last verified: its child continues the branch
+    /// for free; `None` after a failure (the next attempt costs a slot)
+    pub(super) walking: Option<BlockId>,
 }
 
 /// The launch chains: they run the spec's epoch clock and nothing else.
 pub const LAUNCH_CHAINS: &[&str] = &["pussy", "bostrom"];
+
+/// The node's own randomness for its tie draw: the clock and the process,
+/// hashed. Local policy, never consensus.
+fn local_salt() -> [u8; 32] {
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let mut m = Vec::with_capacity(24);
+    m.extend_from_slice(&t.as_nanos().to_le_bytes());
+    m.extend_from_slice(&std::process::id().to_le_bytes());
+    hash32(&m)
+}
 
 /// The statement set with `st` taken in (`None`: it changes nothing), or why
 /// not: the signature and bounds ([`RevertStatement::check`]), the supersede
@@ -140,6 +179,7 @@ impl Chain {
             )));
         }
         reverts.check_static().map_err(|e| ChainError::Store(format!("revert table: {e}")))?;
+        let name = genesis.params().name.clone();
         let rules = Rules {
             chain: genesis.chain_id,
             native: genesis.native_token(),
@@ -147,6 +187,8 @@ impl Chain {
             subsidy: genesis.subsidy(),
             s0: genesis.s0(),
             clock,
+            w_ticket: w_ticket(&name),
+            v_budget: v_budget(&name),
         };
         std::fs::create_dir_all(home).map_err(|e| ChainError::Store(e.to_string()))?;
         let mut store = Store::open(&home.join("blocks")).map_err(ChainError::Store)?;
@@ -181,10 +223,12 @@ impl Chain {
             }
         }
         let engine: Arc<dyn FocusEngine> = opts.engine.unwrap_or_else(|| Arc::new(Tru::for_node()));
-        let mut economy = Economy::new(GenesisWeights::from_file(&genesis.file), engine, clock, Some(home.join("epochs")));
+        let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let mut economy = Economy::new(GenesisWeights::from_file(&genesis.file), engine, clock, Some(home.to_path_buf()), rules.w_ticket, workers);
         economy.background = !opts.inline_settlement;
         economy.quadrature = if opts.quadrature == 0 { super::params::ATTR_NODES } else { opts.quadrature };
-        economy.on_boundary(&state, 0, block0.id(), root0, rules.s0, None);
+        economy.on_boundary(&state, 0, block0.id(), root0, rules.s0);
+        let verify_ema_ms = (BLOCK_TIME as u64 * 500 / rules.v_budget.max(1) as u64).max(1);
         let mut chain = Chain {
             genesis,
             rules,
@@ -206,6 +250,14 @@ impl Chain {
             home: home.to_path_buf(),
             reverted: revert::load_last(&home.join(REVERTED_LOG)),
             retracted_txs: Vec::new(),
+            verifications: VecDeque::new(),
+            tie_salt: local_salt(),
+            budget_spent: false,
+            budget_on: true,
+            arrivals: HashMap::new(),
+            verify_ema_ms,
+            v_budget_pinned: None,
+            walking: None,
         };
         chain.reverts.check_store(&chain.store).map_err(|e| ChainError::Store(format!("revert table: {e}")))?;
         chain.apply_reverts(home)?;
@@ -327,10 +379,11 @@ impl Chain {
             let mut state = self.genesis.state();
             let root0 = state.root();
             let block0 = self.genesis.block0(root0);
-            let mut economy = Economy::new(GenesisWeights::from_file(&self.genesis.file), self.economy.engine.clone(), self.rules.clock, Some(home.join("epochs")));
+            let workers = self.economy.tickets.workers;
+            let mut economy = Economy::new(GenesisWeights::from_file(&self.genesis.file), self.economy.engine.clone(), self.rules.clock, Some(home.clone()), self.rules.w_ticket, workers);
             economy.background = self.economy.background;
             economy.quadrature = self.economy.quadrature;
-            economy.on_boundary(&state, 0, block0.id(), root0, self.rules.s0, None);
+            economy.on_boundary(&state, 0, block0.id(), root0, self.rules.s0);
             self.state = state;
             self.economy = economy;
             self.coinbases.clear();
@@ -352,35 +405,253 @@ impl Chain {
     /// verify the stored roots before readiness (§3.6).
     fn replay(&mut self) -> Result<(), ChainError> {
         let tip = self.store.tip_height();
+        // replay from disk is not a competition at the tip: verify every
+        // stored ticket at full speed, so a node whose `tickets/` cache is
+        // gone still opens (R18-2; rewards.md §7 "Verification").
+        let budget_on = std::mem::replace(&mut self.budget_on, false);
+        let out = self.replay_inner(tip);
+        self.budget_on = budget_on;
+        out
+    }
+
+    fn replay_inner(&mut self, tip: u64) -> Result<(), ChainError> {
         for h in 1..=tip {
             let id = self.store.main_at(h).ok_or_else(|| ChainError::Store(format!("main chain gap at {h}")))?;
             let header = self.store.get(&id).map(|e| e.header).ok_or_else(|| ChainError::Store("missing header".into()))?;
             let body = self.store.body(&id).ok_or_else(|| ChainError::Store(format!("missing body at {h}")))?;
             let txs = apply::decode_body(&self.rules, &header, &body).map_err(ChainError::Block)?;
             let locked = Locked::at(self.coinbases.make_contiguous(), h);
-            self.apply_on_tip(&header, &txs, &locked).map_err(ChainError::Block)?;
+            self.apply_on_tip(&header, &txs, &locked)?;
             self.push_coinbase(h, &txs);
         }
         self.economy.prune(tip);
         Ok(())
     }
 
+    /// The three boundary ids the settlement of epoch `e` reads on the
+    /// main chain: `boundary(e − 1)`, `boundary(e)`, `boundary(e + 1)`.
+    fn settlement_key(&self, e: u64) -> Option<(BlockId, BlockId, BlockId)> {
+        let c = self.rules.clock;
+        Some((self.store.main_at(c.boundary(e - 1))?, self.store.main_at(c.boundary(e))?, self.store.main_at(c.boundary(e + 1))?))
+    }
+
+    /// The lottery of epoch `e` on the main chain: its game and the tickets
+    /// of the window `(boundary(e), boundary(e + 1)]`, each verified or
+    /// recomputed (a replay without the ticket cache solves them again).
+    fn lottery_of(&mut self, e: u64, prev: &BlockId, cur: &BlockId) -> Option<Lottery> {
+        let game = self.economy.game(prev, cur)?.ok()?;
+        let c = self.rules.clock;
+        let mut tickets = Vec::with_capacity(c.length as usize);
+        for h in c.boundary(e) + 1..=c.boundary(e + 1) {
+            let id = self.store.main_at(h)?;
+            let header = self.entry(&id)?.header;
+            tickets.push(self.economy.tickets.verify(&header, &game).ok()?);
+        }
+        Some(Lottery { game, tickets })
+    }
+
+    /// The lottery of epoch `e` whose window closes with the block
+    /// `(end_id, end_header)` now being applied at `boundary(e + 1)` — that
+    /// block is not on the main table yet, so it is read from the arguments
+    /// and every earlier window block from the store (R18-3: the settlement
+    /// job starts at the window's close, the D-block head start of
+    /// chain-economy §2.5).
+    fn lottery_closing(&mut self, e: u64, prev: &BlockId, cur: &BlockId, end_id: &BlockId, end_header: &Header) -> Option<Lottery> {
+        let game = self.economy.game(prev, cur)?.ok()?;
+        let c = self.rules.clock;
+        let last = c.boundary(e + 1);
+        let mut tickets = Vec::with_capacity(c.length as usize);
+        for h in c.boundary(e) + 1..=last {
+            let header = if h == last { *end_header } else { self.entry(&self.store.main_at(h)?)?.header };
+            tickets.push(self.economy.tickets.verify(&header, &game).ok()?);
+        }
+        let _ = end_id;
+        Some(Lottery { game, tickets })
+    }
+
+    /// `V_BUDGET` on or off (replay switches it off itself; tests pin it on).
+    #[cfg(test)]
+    pub(crate) fn set_budget_on(&mut self, on: bool) {
+        self.budget_on = on;
+    }
+
+    /// Set `V_BUDGET` (tests: the flood conformance test pins a small one).
+    #[cfg(test)]
+    pub(crate) fn set_v_budget(&mut self, b: usize) {
+        self.v_budget_pinned = Some(b.max(1));
+    }
+
+    /// The branch the verifier is walking (the last block it verified).
+    #[cfg(test)]
+    pub(crate) fn walking_for_test(&self) -> Option<BlockId> {
+        self.walking
+    }
+
+    /// Verifications spent in the open window, and the unverified set above
+    /// the tip (tests: the flood conformance test).
+    #[cfg(test)]
+    pub(crate) fn flood_state(&self) -> (usize, usize) {
+        (self.verifications.len(), self.unverified_above_tip())
+    }
+
+    /// Open a fresh verification window (tests: the flood conformance test
+    /// renews the budget the next interval would).
+    #[cfg(test)]
+    pub(crate) fn renew_verify_budget(&mut self) {
+        self.verifications.clear();
+        self.budget_spent = false;
+    }
+
+    /// Headers heavier than the tip whose sample this node has not verified
+    /// (`Status::Header` or `Status::Body`, not on the main chain): the set
+    /// `UNVERIFIED_CAP` bounds against a forged-header flood (R18-5).
+    pub(super) fn unverified_above_tip(&self) -> usize {
+        let tip_work = self.entry(&self.tip_id()).map(|e| e.chainwork).unwrap_or(U256::ZERO);
+        self.store
+            .iter()
+            .filter(|(id, e)| e.chainwork > tip_work && matches!(e.status, store::Status::Header | store::Status::Body) && !self.store.on_main(id))
+            .count()
+    }
+
+    /// Make room in the unverified set (R18-15; chain.md §5.4 amended): forget
+    /// every header that has waited for its body longer than one interval,
+    /// then, while the set is at `UNVERIFIED_CAP`, forget an entry chosen by
+    /// the node's local draw — never by claimed chainwork or length, which
+    /// would let a forged heavy tail outlive honest headers. A forgotten
+    /// header is not remembered as rejected: re-offering it costs its sender
+    /// the work again, and the store never grows past the cap.
+    pub(super) fn evict_unverified(&mut self) {
+        let now = Instant::now();
+        let interval = Duration::from_secs(BLOCK_TIME as u64);
+        let tip_work = self.entry(&self.tip_id()).map(|e| e.chainwork).unwrap_or(U256::ZERO);
+        let unverified = |id: &BlockId, e: &store::Entry, on_main: bool| e.chainwork > tip_work && matches!(e.status, store::Status::Header | store::Status::Body) && !on_main && id != &[0u8; 32];
+        let stale: Vec<BlockId> = self
+            .store
+            .iter()
+            .filter(|(id, e)| unverified(id, e, self.store.on_main(id)) && e.status == store::Status::Header && self.arrivals.get(*id).is_some_and(|t| now.duration_since(*t) >= interval))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            self.forget_unverified(&id);
+        }
+        while self.unverified_above_tip() >= super::params::UNVERIFIED_CAP {
+            let victim = self
+                .store
+                .iter()
+                .filter(|(id, e)| unverified(id, e, self.store.on_main(id)))
+                .min_by_key(|(id, _)| hash32(&[&self.tie_salt[..], &id[..]].concat()))
+                .map(|(id, _)| *id);
+            match victim {
+                Some(id) => self.forget_unverified(&id),
+                None => break,
+            }
+        }
+    }
+
+    fn forget_unverified(&mut self, id: &BlockId) {
+        if self.store.forget(id).is_ok() {
+            self.arrivals.remove(id);
+            self.heaviest = self.store.iter().filter(|(_, e)| e.status != store::Status::Invalid).map(|(_, e)| e.chainwork).max().unwrap_or(U256::ZERO);
+        }
+    }
+
+    /// The budget in force: the pinned one (tests) or `⌊0.5·T / t_verify⌋`
+    /// from the node's measured verification time, floor 1 (R18-4).
+    pub(super) fn effective_v_budget(&self) -> usize {
+        self.v_budget_pinned.unwrap_or_else(|| ((BLOCK_TIME as u64 * 500) / self.verify_ema_ms.max(1)).max(1) as usize)
+    }
+
     /// The settlement the block at `height` (on the main tip) must carry,
     /// if one is due: the result reading the main chain's boundaries of
-    /// epochs E − 1 and E (chain-economy §2.5).
+    /// epochs E − 1, E and E + 1 (chain-economy §2.5 amended).
     pub(super) fn settlement_for(&mut self, height: u64) -> Option<Arc<SettleResult>> {
         let e = self.rules.clock.settles_at(height)?;
-        let prev = self.store.main_at(self.rules.clock.boundary(e - 1))?;
-        let cur = self.store.main_at(self.rules.clock.boundary(e))?;
-        self.economy.result(&prev, &cur)
+        let (prev, cur, end) = self.settlement_key(e)?;
+        if let Some(r) = self.economy.lottery_of(&prev, &cur, &end) {
+            return Some(r);
+        }
+        let lottery = self.lottery_of(e, &prev, &cur);
+        self.economy.result(&prev, &cur, &end, move || lottery)
+    }
+
+    /// The game the block at `height` samples (rewards.md §7): the game of
+    /// `epoch(height) − 1`, from the boundaries on the parent's branch.
+    /// `Err` names what is missing — a snapshot this node never took is its
+    /// own condition, never the block's fault.
+    pub(super) fn game_for(&mut self, parent: &BlockId, height: u64) -> Result<Arc<EpochGame>, ChainError> {
+        let c = self.rules.clock;
+        let e = c.game_of(height);
+        let (prev, cur) = if e == 0 {
+            let g = self.store.main_at(0).ok_or(ChainError::Store("no genesis".into()))?;
+            (g, g)
+        } else {
+            let at = |h: u64| self.store.ancestor_at(parent, h).ok_or_else(|| ChainError::Game(format!("no ancestor at {h}")));
+            (at(c.boundary(e - 1))?, at(c.boundary(e))?)
+        };
+        match self.economy.game(&prev, &cur) {
+            Some(Ok(g)) => Ok(g),
+            Some(Err(e)) => Err(ChainError::Game(e)),
+            None => Err(ChainError::Game(format!("the boundary snapshots of epoch {e} are not held on this node"))),
+        }
+    }
+
+    /// Chain.md §5.5 step 8, the sample: the header's ticket recomputed on
+    /// its game and compared with its commitment, under the node-wide
+    /// budget of `V_BUDGET` full verifications per block interval. A cached
+    /// ticket costs nothing and is outside the budget.
+    fn verify_sample(&mut self, header: &Header) -> Result<(), ChainError> {
+        // a zero sample is never an honest commitment (R18-5): refuse it
+        // before a game is built or a verification slot is spent
+        if header.sample == [0u8; 32] {
+            return Err(ChainError::Block(apply::BlockError::Sample("the sample is zero".into())));
+        }
+        let game = self.game_for(&header.prev, header.height)?;
+        // `V_BUDGET` counts branch attempts per interval, not blocks (R18-14,
+        // tru#45 §7): the verifier walks one branch from its verified tip and
+        // each success extends the tip at once — the next block of the same
+        // branch continues for free, which is replay and initial download at
+        // full speed; the first failure drops the branch and its descendants;
+        // starting on another branch (a block whose parent is not the block
+        // just verified, or any block after a failure) costs one slot. A
+        // flood of forged headers at the tip is one branch attempt each, one
+        // free after an honest success, so at most `V_BUDGET + 1`
+        // recomputations per interval, and no chain length or claimed work
+        // buys an exemption.
+        let continuing = self.walking == Some(header.prev);
+        if self.budget_on && !continuing && !self.economy.tickets.is_cached(header) {
+            let now = Instant::now();
+            let interval = Duration::from_secs(BLOCK_TIME as u64);
+            while self.verifications.front().is_some_and(|t| now.duration_since(*t) >= interval) {
+                self.verifications.pop_front();
+            }
+            if self.verifications.len() >= self.effective_v_budget() {
+                self.budget_spent = true;
+                return Err(ChainError::VerifyBudget);
+            }
+            self.verifications.push_back(now);
+        }
+        let cached = self.economy.tickets.is_cached(header);
+        let t0 = Instant::now();
+        let out = self.economy.tickets.verify(header, &game).map(|_| ()).map_err(|e| ChainError::Block(apply::BlockError::Sample(e.to_string())));
+        if !cached {
+            // the measured recomputation feeds the budget (R18-4): an EMA with
+            // weight 1/8 on the latest, so a slow node spends fewer slots and a
+            // fast one more, floor 1 either way
+            let ms = (t0.elapsed().as_millis() as u64).max(1);
+            self.verify_ema_ms = (self.verify_ema_ms * 7 + ms) / 8;
+        }
+        self.walking = if out.is_ok() { Some(header.id()) } else { None };
+        out
     }
 
     /// Steps 7–8 for a block whose parent is the main tip, with the
-    /// economy's side effects: the settlement result in, the outcome kept,
-    /// the boundary snapshot taken and its settlement started.
-    fn apply_on_tip(&mut self, header: &Header, txs: &[Decoded], locked: &Locked) -> Result<super::state::Undo, apply::BlockError> {
+    /// economy's side effects: the sample verified, the settlement result
+    /// in, the outcome kept, the boundary snapshot taken and the closed
+    /// epoch's settlement started.
+    fn apply_on_tip(&mut self, header: &Header, txs: &[Decoded], locked: &Locked) -> Result<super::state::Undo, ChainError> {
+        self.verify_sample(header)?;
         let settle = self.settlement_for(header.height);
-        let applied = apply::apply_block(&self.rules, header, txs, &mut self.state, locked, settle.as_deref())?;
+        let applied = apply::apply_block(&self.rules, header, txs, &mut self.state, locked, settle.as_deref()).map_err(ChainError::Block)?;
         let id = header.id();
         if let Some(outcome) = applied.settled {
             self.economy.record_outcome(id, outcome);
@@ -388,9 +659,22 @@ impl Chain {
         let clock = self.rules.clock;
         if clock.is_boundary(header.height) {
             let epoch = clock.epoch(header.height);
-            let prev = self.store.main_at(clock.boundary(epoch - 1));
             let supply = self.rules.supply_at(header.height);
-            self.economy.on_boundary(&self.state, epoch, id, header.state_root, supply, prev);
+            self.economy.on_boundary(&self.state, epoch, id, header.state_root, supply);
+            // the window of epoch E = epoch − 1 closes with this boundary
+            // block: start its settlement now, D blocks before settle(E), on
+            // a worker thread (R18-3, chain-economy §2.5). This block is not
+            // on the main table yet, so it is `end` and the window's last
+            // ticket; `prev` and `cur` are earlier boundaries on main.
+            if epoch >= 2 {
+                let c = self.rules.clock;
+                let e = epoch - 1;
+                if let (Some(prev), Some(cur)) = (self.store.main_at(c.boundary(e - 1)), self.store.main_at(c.boundary(e))) {
+                    if let Some(lottery) = self.lottery_closing(e, &prev, &cur, &id, header) {
+                        self.economy.start(prev, cur, id, lottery);
+                    }
+                }
+            }
         }
         Ok(applied.undo)
     }
@@ -441,7 +725,27 @@ impl Chain {
 
     pub(super) fn invalidate(&mut self, id: BlockId) {
         let _ = self.store.set_status(&id, store::Status::Invalid);
+        self.arrivals.remove(&id);
         self.remember_rejected(id);
+    }
+
+    /// Invalidate `id` and every stored descendant: a branch whose ticket
+    /// failed is dead to its end, and a heavy body-less tail above a dead
+    /// root never counts again (R18-14).
+    pub(super) fn invalidate_subtree(&mut self, id: BlockId) {
+        let Some(h) = self.entry(&id).map(|e| e.header.height) else { return };
+        let below: Vec<BlockId> = self
+            .store
+            .iter()
+            .filter(|(_, e)| e.status != store::Status::Invalid && e.header.height > h)
+            .filter(|(d, _)| self.store.ancestor_at(d, h) == Some(id))
+            .map(|(d, _)| *d)
+            .collect();
+        self.invalidate(id);
+        for d in below {
+            self.invalidate(d);
+        }
+        self.heaviest = self.store.iter().filter(|(_, e)| e.status != store::Status::Invalid).map(|(_, e)| e.chainwork).max().unwrap_or(U256::ZERO);
     }
 
     /// Invalid for contradicting a held checkpoint (see `vetoed`).
@@ -461,18 +765,31 @@ impl Chain {
         ChainError::Checkpoint { height, expected }
     }
 
-    /// Non-invalid headers heavier than the tip, heaviest first, ties in
-    /// first-seen order (§5.1).
+    /// Non-invalid headers heavier than the tip, heaviest first; ties among
+    /// verified blocks in first-seen order (§5.1), ties among blocks whose
+    /// sample is still to be checked in an order drawn from the node's own
+    /// salt — unpredictable to a sender flooding target-passing headers
+    /// (rewards.md §7 "Verification").
     fn candidates(&self) -> Vec<BlockId> {
         let tip_work = self.entry(&self.tip_id()).map(|e| e.chainwork).unwrap_or(U256::ZERO);
-        let mut v: Vec<(U256, u64, BlockId)> = self
+        let mut v: Vec<(U256, u8, [u8; 32], BlockId)> = self
             .store
             .iter()
             .filter(|(_, e)| e.status != store::Status::Invalid && e.chainwork > tip_work)
-            .map(|(id, e)| (e.chainwork, e.seq, *id))
+            .map(|(id, e)| {
+                let verified = e.status == store::Status::Valid;
+                let key = if verified {
+                    let mut k = [0u8; 32];
+                    k[..8].copy_from_slice(&e.seq.to_be_bytes());
+                    k
+                } else {
+                    hash32(&[&self.tie_salt[..], &id[..]].concat())
+                };
+                (e.chainwork, u8::from(!verified), key, *id)
+            })
             .collect();
-        v.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        v.into_iter().map(|(_, _, id)| id).collect()
+        v.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        v.into_iter().map(|(_, _, _, id)| id).collect()
     }
 
     /// Median time past of the parent and its ancestors (§1.4).
@@ -590,16 +907,20 @@ impl Chain {
         let locked = self.locked_at(header.height);
         let undo = match self.apply_on_tip(header, txs, &locked) {
             Ok(undo) => undo,
-            // a settlement this node cannot compute is its own condition,
-            // never the block's fault (chain-economy §2.5: it waits)
-            Err(e @ apply::BlockError::Settlement { .. }) => return Err(ChainError::Block(e)),
+            // a settlement or a game this node cannot compute, or a spent
+            // verification budget, is its own condition, never the block's
+            // fault (chain-economy §2.5: it waits)
+            Err(e) if !e.is_blocks_fault() => return Err(e),
             Err(e) => {
-                self.invalidate(id);
-                return Err(ChainError::Block(e));
+                // the branch is dropped at its first failed ticket, with every
+                // stored descendant (R18-14): none of them is verified again
+                self.invalidate_subtree(id);
+                return Err(e);
             }
         };
         self.store.put_undo(&id, &undo).map_err(ChainError::Store)?;
         self.store.set_status(&id, store::Status::Valid).map_err(ChainError::Store)?;
+        self.arrivals.remove(&id);
         self.store.push_main(id).map_err(ChainError::Store)?;
         self.push_coinbase(header.height, txs);
         Ok(())
@@ -664,15 +985,57 @@ impl Chain {
     /// missing. A heavier chain the reorg limit or a checkpoint forbids is
     /// reported and skipped in favour of the next candidate.
     pub fn try_advance(&mut self) -> Result<BlockVerdict, ChainError> {
+        self.budget_spent = false;
         let tip = self.tip_id();
         let tip_work = self.entry(&tip).map(|e| e.chainwork).unwrap_or(U256::ZERO);
         if !select::heavier(self.heaviest, tip_work) {
             return Ok(BlockVerdict::Known);
         }
+        // 1. the branches rooted at the verified tip, in the node's local
+        //    draw order and nothing else (tru#45 §7, chain.md §5.4 amended):
+        //    claimed chainwork or length never orders an unverified branch,
+        //    or a long body-less forged chain would outrank honest successors.
+        //    The walker verifies one branch sequentially, each success
+        //    extending the tip at once; the first failure drops the branch.
+        let mut roots: Vec<([u8; 32], BlockId)> = self
+            .store
+            .iter()
+            .filter(|(id, e)| e.header.prev == tip && e.status != store::Status::Invalid && !self.store.on_main(id))
+            .map(|(id, _)| (hash32(&[&self.tie_salt[..], &id[..]].concat()), *id))
+            .collect();
+        roots.sort();
+        let mut missing = Vec::new();
+        let mut last_fault = None;
+        for (_, root) in roots {
+            match self.walk_branch(root) {
+                Ok(Some(v)) => return Ok(v),
+                Ok(None) => {
+                    // the root has no body: name every body the branch's best
+                    // known path lacks, oldest first, for header-first sync
+                    let h = self.entry(&root).map(|e| e.header.height).unwrap_or(0);
+                    let best = self
+                        .store
+                        .iter()
+                        .filter(|(id, e)| e.status != store::Status::Invalid && (**id == root || (e.header.height > h && self.store.ancestor_at(id, h) == Some(root))))
+                        .max_by_key(|(_, e)| (e.chainwork, std::cmp::Reverse(e.seq)))
+                        .map(|(id, _)| *id)
+                        .unwrap_or(root);
+                    let (_, path) = self.path_from_main(&best)?;
+                    missing.extend(path.iter().filter(|id| !self.store.has_body(id)).copied());
+                }
+                Err(e) if e.is_blocks_fault() => last_fault = Some(e),
+                Err(e) => return Err(e),
+            }
+        }
+        // 2. deeper forks: a whole path whose bodies are all present, by
+        //    verified chainwork order among applied candidates
         let mut first_error = None;
         for best in self.candidates() {
             let (fork_height, path) = self.path_from_main(&best)?;
             let tip_height = self.store.tip_height();
+            if fork_height == tip_height {
+                continue; // a branch of the tip: the walker's, above
+            }
             if !select::reorg_allowed(tip_height, fork_height) {
                 first_error.get_or_insert(ChainError::DeepFork { fork_height, tip_height });
                 continue;
@@ -693,17 +1056,72 @@ impl Chain {
                 first_error.get_or_insert(ChainError::Checkpoint { height, expected });
                 continue;
             }
-            let missing: Vec<BlockId> = path.iter().filter(|id| !self.store.has_body(id)).copied().collect();
-            if !missing.is_empty() {
-                return Ok(BlockVerdict::NeedBodies(missing));
+            let missing_here: Vec<BlockId> = path.iter().filter(|id| !self.store.has_body(id)).copied().collect();
+            if !missing_here.is_empty() {
+                missing.extend(missing_here);
+                continue;
             }
             return self.reorg(fork_height, &path);
+        }
+        // a root whose sample failed is reported before any missing body
+        // (R18-17): its sender's +100 and ban must never be lost to another
+        // root's state; the bodies still wanted are re-asked by the sync
+        // pass through `missing_bodies`
+        if let Some(e) = last_fault {
+            return Err(e);
+        }
+        if !missing.is_empty() {
+            return Ok(BlockVerdict::NeedBodies(missing));
         }
         match first_error {
             Some(e) => Err(e),
             None => Ok(BlockVerdict::Stored),
         }
     }
+
+    /// Walk one branch from the verified tip (R18-14, tru#45 §7): apply the
+    /// root and then, while a child with a body exists (chosen by the local
+    /// draw among siblings), the next block — each success extends the tip
+    /// at once. `Ok(None)`: the root has no body yet. `Ok(Some(_))`: at
+    /// least one block applied. `Err`: the root failed (a sample or body
+    /// fault drops the whole branch; a spent budget leaves it waiting).
+    fn walk_branch(&mut self, root: BlockId) -> Result<Option<BlockVerdict>, ChainError> {
+        let mut cur = root;
+        let mut applied = false;
+        loop {
+            if !self.store.has_body(&cur) {
+                return Ok(applied.then_some(BlockVerdict::Extended));
+            }
+            let (header, txs) = match self.decoded(&cur) {
+                Ok(d) => d,
+                Err(e) => {
+                    if e.is_blocks_fault() {
+                        self.invalidate_subtree(cur);
+                    }
+                    return if applied { Ok(Some(BlockVerdict::Extended)) } else { Err(e) };
+                }
+            };
+            match self.extend(&header, &txs) {
+                Ok(()) => {
+                    applied = true;
+                    self.after_tip_move()?;
+                }
+                Err(e) => return if applied { Ok(Some(BlockVerdict::Extended)) } else { Err(e) },
+            }
+            let next = self
+                .store
+                .iter()
+                .filter(|(id, e)| e.header.prev == cur && e.status != store::Status::Invalid && self.store.has_body(id))
+                .map(|(id, _)| (hash32(&[&self.tie_salt[..], &id[..]].concat()), *id))
+                .min()
+                .map(|(_, id)| id);
+            match next {
+                Some(id) => cur = id,
+                None => return Ok(Some(BlockVerdict::Extended)),
+            }
+        }
+    }
+
 
     /// The heaviest non-invalid header whose chain the node may still move
     /// to — the target of header-first body download (chain-wire §3.2) —
@@ -788,9 +1206,12 @@ impl Chain {
             applied += 1;
         }
         if let Some(e) = failure {
-            // every descendant of the failed block is invalid too
-            for id in &path[applied + 1..] {
-                self.invalidate(*id);
+            // every descendant of the failed block is invalid too — unless
+            // the failure was this node's own condition
+            if e.is_blocks_fault() {
+                for id in &path[applied + 1..] {
+                    self.invalidate(*id);
+                }
             }
             for _ in 0..applied {
                 self.retract()?;

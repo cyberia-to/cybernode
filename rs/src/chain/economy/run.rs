@@ -1,16 +1,22 @@
-//! Settlement off the block path (chain-economy §2.5, §7.2).
+//! Settlement off the block path (chain-economy §2.5, §7.2; rewards.md §7).
 //!
 //! At every boundary block the node freezes the boundary state
-//! ([`Snapshot`]) and starts the epoch's three solves on a worker thread;
-//! the D blocks until `settle(E)` are produced and validated meanwhile. The
-//! block at `settle(E)` takes the finished result — joining the worker if
-//! it is still running, which is the liveness bound of §2.5: a node that
-//! has not finished waits, it never guesses.
+//! ([`Snapshot`]). The game of the epoch that just closed is built from the
+//! last two snapshots when the next epoch's first block asks for it
+//! ([`Economy::game`]); its blocks sample that game, and their verified
+//! tickets are kept ([`Tickets`]). When the window closes — the boundary of
+//! `E + 1` — the settlement of `E` starts on a worker thread with the two
+//! snapshots and the window's tickets; the D blocks until `settle(E)` are
+//! produced and validated meanwhile. The block at `settle(E)` takes the
+//! finished result — joining the worker if it is still running, which is
+//! the liveness bound of §2.5: a node that has not finished waits, it never
+//! guesses.
 //!
 //! Everything is keyed by block ids: a snapshot by its boundary block, a
-//! result by the pair of boundary blocks it reads. A reorganization that
-//! replaces a boundary simply asks for another key; a reorganization above
-//! it finds the same result. Results are also kept on disk under
+//! game by the boundary that closes it, a result by the three boundary
+//! blocks it reads (the window's end names its tickets). A reorganization
+//! that replaces a boundary simply asks for another key; a reorganization
+//! above it finds the same result. Results are also kept on disk under
 //! `$home/epochs/` (the cache, keyed by the engine id too), so a restart
 //! replays the chain without recomputing every epoch.
 
@@ -22,13 +28,17 @@ use std::time::Instant;
 
 use super::super::params::EpochClock;
 use super::super::state::{Id, StateBackend};
+use super::super::ticket::EpochGame;
 use super::focus::{FocusEngine, FocusGraph};
+use super::lottery::{Lottery, PlayerEstimate, Tickets};
 use super::settle::{Earner, FocusOut, Outcome, SettleResult, Snapshot, compute_with};
 use super::weights::GenesisWeights;
 use super::wide::W;
 use super::Mark;
 
-type Key = (Id, Id);
+/// `(boundary(E − 1), boundary(E), boundary(E + 1))`: the two snapshots and
+/// the window's end.
+type Key = (Id, Id, Id);
 
 /// Timing of one computed settlement (informational, never consensus).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,6 +58,10 @@ pub struct Economy {
     /// gradient nodes on the epoch's path (1 = the midpoint, chain-economy
     /// §5.1); part of every cached result's key
     pub quadrature: usize,
+    /// `W_TICKET` of the chain
+    pub width: usize,
+    /// the games and the verified tickets (rewards.md §7)
+    pub tickets: Tickets,
     snapshots: HashMap<Id, Arc<Snapshot>>,
     jobs: HashMap<Key, JoinHandle<(SettleResult, u64)>>,
     done: HashMap<Key, Arc<SettleResult>>,
@@ -60,8 +74,11 @@ pub struct Economy {
 }
 
 impl Economy {
-    pub fn new(weights: GenesisWeights, engine: Arc<dyn FocusEngine>, clock: EpochClock, dir: Option<PathBuf>) -> Economy {
-        if let Some(d) = &dir {
+    /// `dir` is the chain's home (`epochs/` and `tickets/` go under it);
+    /// `width` is `W_TICKET`; `workers` the solve threads a ticket may use.
+    pub fn new(weights: GenesisWeights, engine: Arc<dyn FocusEngine>, clock: EpochClock, dir: Option<PathBuf>, width: usize, workers: usize) -> Economy {
+        let epochs = dir.as_ref().map(|d| d.join("epochs"));
+        if let Some(d) = &epochs {
             let _ = std::fs::create_dir_all(d);
         }
         Economy {
@@ -70,13 +87,15 @@ impl Economy {
             clock,
             background: true,
             quadrature: super::super::params::ATTR_NODES,
+            width,
+            tickets: Tickets::new(dir.as_ref().map(|d| d.join("tickets")), workers),
             snapshots: HashMap::new(),
             jobs: HashMap::new(),
             done: HashMap::new(),
             syntropy: Arc::new(Mutex::new(HashMap::new())),
             outcomes: HashMap::new(),
             timings: Arc::new(Mutex::new(Vec::new())),
-            dir,
+            dir: epochs,
         }
     }
 
@@ -84,18 +103,23 @@ impl Economy {
         self.snapshots.get(block).cloned()
     }
 
-    /// Freeze the state after the boundary block `block` of `epoch` and,
-    /// when the previous boundary's snapshot is held, start the epoch's
-    /// settlement. `prev` is the previous boundary's block id (none at
-    /// genesis).
-    pub fn on_boundary(&mut self, state: &impl StateBackend, epoch: u64, block: Id, root: Id, supply: u64, prev: Option<Id>) {
+    /// Freeze the state after the boundary block `block` of `epoch`.
+    pub fn on_boundary(&mut self, state: &impl StateBackend, epoch: u64, block: Id, root: Id, supply: u64) {
         if !self.snapshots.contains_key(&block) {
             let snap = Snapshot::capture(state, epoch, block, root, supply);
             self.snapshots.insert(block, Arc::new(snap));
         }
-        if let Some(prev) = prev {
-            self.start(prev, block);
+    }
+
+    /// The game of the epoch `boundary(E) = cur` closes: from the snapshots
+    /// of `prev` (`boundary(E − 1)`; `cur` itself for epoch 0) and `cur`,
+    /// built once. `None` when a snapshot is missing on this node.
+    pub fn game(&mut self, prev: &Id, cur: &Id) -> Option<Result<Arc<EpochGame>, String>> {
+        if let Some(g) = self.tickets.game(cur) {
+            return Some(Ok(g));
         }
+        let (a, b) = (self.snapshot(prev)?, self.snapshot(cur)?);
+        Some(self.tickets.game_of(&a, &b, &self.weights, self.width))
     }
 
     fn cache_path(&self, key: &Key) -> Option<PathBuf> {
@@ -104,6 +128,7 @@ impl Economy {
         buf.extend_from_slice(&(self.quadrature as u32).to_le_bytes());
         buf.extend_from_slice(&key.0);
         buf.extend_from_slice(&key.1);
+        buf.extend_from_slice(&key.2);
         Some(dir.join(format!("{}.settle", hex(hemera::hash(&buf).as_bytes()))))
     }
 
@@ -116,10 +141,11 @@ impl Economy {
         Some(r)
     }
 
-    /// Start the settlement reading boundaries `prev` and `cur`, unless it
-    /// is done, running or cached.
-    pub fn start(&mut self, prev: Id, cur: Id) {
-        let key = (prev, cur);
+    /// Start the settlement of the epoch whose boundaries are `prev` and
+    /// `cur` and whose window ends at `end`, with the window's tickets,
+    /// unless it is done, running or cached.
+    pub fn start(&mut self, prev: Id, cur: Id, end: Id, lottery: Lottery) {
+        let key = (prev, cur, end);
         if self.done.contains_key(&key) || self.jobs.contains_key(&key) || self.load(&key).is_some() {
             return;
         }
@@ -141,7 +167,7 @@ impl Economy {
                     syntropy.lock().expect("syntropy map").insert(a.block_id, j);
                     j
                 });
-                compute_with(&a, &b, &weights, engine.as_ref(), Some(prev_j), quadrature)
+                compute_with(&a, &b, &weights, engine.as_ref(), Some(prev_j), quadrature, &lottery)
             }));
             let r = match computed {
                 Ok(r) => r,
@@ -176,21 +202,22 @@ impl Economy {
         }
     }
 
-    /// Is the settlement of `(prev, cur)` finished (or cached)?
-    pub fn ready(&self, prev: &Id, cur: &Id) -> bool {
-        let key = (*prev, *cur);
+    /// Is the settlement of `(prev, cur, end)` finished (or cached)?
+    pub fn ready(&self, prev: &Id, cur: &Id, end: &Id) -> bool {
+        let key = (*prev, *cur, *end);
         self.done.contains_key(&key) || self.jobs.get(&key).is_some_and(|j| j.is_finished())
     }
 
-    /// The settlement reading boundaries `prev` and `cur`: finished, joined
-    /// (waiting for the worker), or computed now. `None` only when a
-    /// snapshot is missing — the boundary was never applied on this node.
+    /// The settlement reading boundaries `prev` and `cur` with the window
+    /// ending at `end`: finished, joined (waiting for the worker), loaded
+    /// from the cache, or computed now with `lottery` (`None` only when the
+    /// caller could not assemble the lottery and nothing is held).
     ///
     /// A panic in the settlement is a halt by design (chain-economy §2.5
     /// liveness; plan P2, decision D14): it is re-raised with the epoch and
     /// height named, nothing is recorded, a replay halts at the same block.
-    pub fn result(&mut self, prev: &Id, cur: &Id) -> Option<Arc<SettleResult>> {
-        let key = (*prev, *cur);
+    pub fn result(&mut self, prev: &Id, cur: &Id, end: &Id, lottery: impl FnOnce() -> Option<Lottery>) -> Option<Arc<SettleResult>> {
+        let key = (*prev, *cur, *end);
         if let Some(r) = self.done.get(&key) {
             return Some(r.clone());
         }
@@ -206,8 +233,9 @@ impl Economy {
         if let Some(r) = self.load(&key) {
             return Some(r);
         }
+        let lottery = lottery()?;
         let background = std::mem::replace(&mut self.background, false);
-        self.start(*prev, *cur);
+        self.start(*prev, *cur, *end, lottery);
         self.background = background;
         self.done.get(&key).cloned()
     }
@@ -220,13 +248,18 @@ impl Economy {
         self.outcomes.get(block).cloned()
     }
 
+    /// The lottery's estimate of the settlement a block carried.
+    pub fn lottery_of(&self, prev: &Id, cur: &Id, end: &Id) -> Option<Arc<SettleResult>> {
+        self.done.get(&(*prev, *cur, *end)).cloned()
+    }
+
     pub fn timings(&self) -> Vec<Timing> {
         self.timings.lock().expect("timings").clone()
     }
 
-    /// Drop snapshots, results and outcomes of boundaries more than three
-    /// epochs below `tip` (a reorg never reaches them, §5.2). The genesis
-    /// snapshot stays.
+    /// Drop snapshots, games, tickets, results and outcomes of boundaries
+    /// more than three epochs below `tip` (a reorg never reaches them, §5.2).
+    /// The genesis snapshot stays.
     pub fn prune(&mut self, tip: u64) {
         let floor = tip.saturating_sub(3 * self.clock.length + self.clock.delay);
         self.snapshots.retain(|_, s| s.height == 0 || s.height >= floor);
@@ -242,6 +275,7 @@ impl Economy {
         }
         let keep: std::collections::HashSet<Id> = self.snapshots.keys().copied().collect();
         self.syntropy.lock().expect("syntropy map").retain(|id, _| keep.contains(id));
+        self.tickets.prune(|id| keep.contains(id), floor);
     }
 }
 
@@ -251,7 +285,7 @@ fn hex(b: &[u8]) -> String {
 
 // ── the cache file: one settlement result without φ*'s vector ───────────
 
-const MAGIC: &[u8; 8] = b"S3SETL01";
+const MAGIC: &[u8; 8] = b"S3SETL02";
 
 fn encode(r: &SettleResult) -> Vec<u8> {
     let mut out = MAGIC.to_vec();
@@ -280,6 +314,19 @@ fn encode(r: &SettleResult) -> Vec<u8> {
         out.extend_from_slice(&m.pos.to_le_bytes());
         out.extend_from_slice(&m.neg.to_le_bytes());
     }
+    out.extend_from_slice(&r.value.to_le_bytes());
+    for v in [r.players, r.samples, r.by_mean] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.extend_from_slice(&(r.lottery.len() as u64).to_le_bytes());
+    for e in &r.lottery {
+        out.extend_from_slice(&e.card);
+        out.push(e.side as u8);
+        out.extend_from_slice(&e.k.to_le_bytes());
+        for v in [e.mean, e.stderr, e.exact, e.a, e.paid] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+    }
     out
 }
 
@@ -294,13 +341,15 @@ fn decode(b: &[u8]) -> Option<SettleResult> {
         return None;
     }
     let u64_ = |s: &[u8]| u64::from_le_bytes(s.try_into().expect("8"));
+    let u32_ = |s: &[u8]| u32::from_le_bytes(s.try_into().expect("4"));
+    let i128_ = |s: &[u8]| i128::from_le_bytes(s.try_into().expect("16"));
     let (epoch, boundary, focus_bps) = (u64_(take(8)?), u64_(take(8)?), u64_(take(8)?));
     let id = |s: &[u8]| -> Id { s.try_into().expect("32") };
     let (prev_block, beacon, boundary_root, phi) = (id(take(32)?), id(take(32)?), id(take(32)?), id(take(32)?));
-    let particles = u32::from_le_bytes(take(4)?.try_into().ok()?);
-    let axons = u32::from_le_bytes(take(4)?.try_into().ok()?);
-    let syntropy = i128::from_le_bytes(take(16)?.try_into().ok()?);
-    let prev_syntropy = i128::from_le_bytes(take(16)?.try_into().ok()?);
+    let particles = u32_(take(4)?);
+    let axons = u32_(take(4)?);
+    let syntropy = i128_(take(16)?);
+    let prev_syntropy = i128_(take(16)?);
     let n = u64_(take(8)?) as usize;
     let mut earners = Vec::with_capacity(n.min(1 << 20));
     for _ in 0..n {
@@ -318,6 +367,17 @@ fn decode(b: &[u8]) -> Option<SettleResult> {
     for _ in 0..m {
         let a = id(take(32)?);
         marks.push((a, Mark { pos: u64_(take(8)?), neg: u64_(take(8)?) }));
+    }
+    let value = i128_(take(16)?);
+    let (players, samples, by_mean) = (u32_(take(4)?), u32_(take(4)?), u32_(take(4)?));
+    let l = u64_(take(8)?) as usize;
+    let mut lottery = Vec::with_capacity(l.min(1 << 20));
+    for _ in 0..l {
+        let card = id(take(32)?);
+        let side = take(1)?[0] as i8;
+        let k = u32_(take(4)?);
+        let (mean, stderr, exact, a, paid) = (i128_(take(16)?), i128_(take(16)?), i128_(take(16)?), i128_(take(16)?), i128_(take(16)?));
+        lottery.push(PlayerEstimate { card, side, k, mean, stderr, exact, a, paid });
     }
     if at != b.len() {
         return None;
@@ -337,6 +397,11 @@ fn decode(b: &[u8]) -> Option<SettleResult> {
         earners,
         marks,
         focus: Arc::new(FocusOut { particles: Vec::new(), phi: Vec::new(), syntropy, digest: phi }),
+        value,
+        players,
+        samples,
+        by_mean,
+        lottery,
     })
 }
 

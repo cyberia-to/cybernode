@@ -1,18 +1,40 @@
-//! The node's mining API (chain-wire.md §7): `GET /template?to={neuron}`,
-//! `POST /submit`, `GET /tip` — the JSON shapes and a blocking client with
-//! retry.
+//! The node's mining API (chain-wire.md §7, amended): `GET /template?to={neuron}`
+//! with the game it names, `GET /game/{beacon}`, `POST /submit`, `GET /tip`
+//! — the JSON shapes and a blocking client with retry.
 
-use super::target::{from_bytes, Words};
+use crate::chain::header::Header;
 use crate::chain::params::HEADER_BYTES;
+use crate::chain::ticket::GameWire;
+use crate::chain::u256::U256;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// The game a template names (chain-wire §7 amended): enough to fetch it
+/// (`GET /game/{beacon}`) and to check what came back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GameSummary {
+    pub epoch: u64,
+    pub beacon: String,
+    pub cluster: String,
+    pub players: usize,
+    pub axons: usize,
+    pub w_ticket: usize,
+}
+
+impl GameSummary {
+    pub fn beacon_id(&self) -> Result<[u8; 32], String> {
+        unhex(&self.beacon)?.try_into().map_err(|v: Vec<u8>| format!("beacon is {} bytes, not 32", v.len()))
+    }
+}
+
 /// `GET /template?to={neuron}` (chain-wire §7). Hex is lowercase, bytes in
-/// wire order; `target` is the 32 little-endian bytes `decode(bits)`
-/// (redundant with the header's `bits`, so an external worker needs no
-/// compact-bits decoder); `expires` is the unix second after which the
-/// node will answer `409` to a submit of this template (the template also
-/// expires the moment the tip moves — poll `GET /tip`).
+/// wire order; the header is the 200 bytes with nonce and sample zero;
+/// `target` is the 32 little-endian bytes `decode(bits)` (redundant with
+/// the header's `bits`, so an external worker needs no compact-bits
+/// decoder); `expires` is the unix second after which the node will answer
+/// `409` to a submit of this template (the template also expires the moment
+/// the tip moves — poll `GET /tip`); `game` names the game the block samples.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Template {
@@ -24,6 +46,7 @@ pub struct Template {
     pub target: String,
     pub body: String,
     pub expires: u64,
+    pub game: GameSummary,
 }
 
 /// `POST /submit` body: the solved header.
@@ -56,6 +79,10 @@ pub enum Verdict {
     Accepted(Accepted),
     /// `409`: the template's tip is gone — refresh.
     Stale,
+    /// `422` with a `waiting:` reason: the node stored the block and will
+    /// verify its sample when its `V_BUDGET` renews (chain.md §5.5 step 8)
+    /// — nothing to resubmit; refresh.
+    Waiting(String),
     /// `400`/`422`: the node rejected the header, with its reason.
     Rejected(String),
 }
@@ -80,11 +107,16 @@ impl Template {
         })
     }
 
-    pub fn target_words(&self) -> Result<Words, String> {
+    /// The template as the kernel's header (nonce and sample zero).
+    pub fn header(&self) -> Result<Header, String> {
+        Header::decode_raw(&self.header_bytes()?).map_err(|e| e.to_string())
+    }
+
+    pub fn target_u256(&self) -> Result<U256, String> {
         let b: [u8; 32] = unhex(&self.target)?
             .try_into()
             .map_err(|v: Vec<u8>| format!("template target is {} bytes, not 32", v.len()))?;
-        Ok(from_bytes(&b))
+        Ok(U256::from_le_bytes(&b))
     }
 
     pub fn bits_u32(&self) -> Result<u32, String> {
@@ -128,6 +160,13 @@ impl Client {
         json(r, "GET /template")
     }
 
+    /// `GET /game/{beacon}`: the game of the epoch the boundary `beacon` closes.
+    pub fn game(&self, beacon: &str) -> Result<GameWire, String> {
+        let url = format!("{}/game/{}", self.node, beacon);
+        let r = self.agent.get(&url).call().map_err(|e| format!("GET /game: {e}"))?;
+        json(r, "GET /game")
+    }
+
     pub fn tip(&self) -> Result<Tip, String> {
         let url = format!("{}/tip", self.node);
         let r = self
@@ -154,6 +193,9 @@ impl Client {
             Err(ureq::Error::Status(409, _)) => Ok(Verdict::Stale),
             Err(ureq::Error::Status(code @ (400 | 422), r)) => {
                 let reason = r.into_string().unwrap_or_default();
+                if code == 422 && reason.contains("waiting:") {
+                    return Ok(Verdict::Waiting(reason.trim().to_string()));
+                }
                 Ok(Verdict::Rejected(format!("{code}: {}", reason.trim())))
             }
             Err(e) => Err(format!("POST /submit: {e}")),
@@ -197,22 +239,20 @@ mod tests {
             chain: "pussy".into(),
             height: 7,
             prev: "11".repeat(32),
-            header: "00".repeat(168),
+            header: "00".repeat(HEADER_BYTES),
             bits: "1e010000".into(),
-            target: hex(&crate::chain::mine::target::to_bytes(
-                &crate::chain::mine::target::pow2(232),
-            )),
+            target: hex(&(U256::ONE << 232).to_le_bytes()),
             body: "0100000001000700".into(),
             expires: 1_793_885_850,
+            game: GameSummary { epoch: 0, beacon: "ab".repeat(32), cluster: "cd".repeat(32), players: 0, axons: 3, w_ticket: 2 },
         };
         let s = serde_json::to_string(&t).unwrap();
         assert_eq!(serde_json::from_str::<Template>(&s).unwrap(), t);
         assert_eq!(t.bits_u32().unwrap(), 0x1e01_0000);
-        assert_eq!(
-            t.target_words().unwrap(),
-            crate::chain::mine::target::pow2(232)
-        );
-        assert_eq!(t.header_bytes().unwrap(), [0u8; 168]);
+        assert_eq!(t.target_u256().unwrap(), U256::ONE << 232);
+        assert_eq!(t.header_bytes().unwrap(), [0u8; HEADER_BYTES]);
+        assert_eq!(t.header().unwrap().height, 0);
+        assert_eq!(t.game.beacon_id().unwrap(), [0xab; 32]);
         assert!(
             serde_json::from_str::<Template>(&s.replace("\"chain\"", "\"extra\":1,\"chain\""))
                 .is_err()

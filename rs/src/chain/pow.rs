@@ -35,10 +35,6 @@ mod tests {
     use super::*;
     use super::super::params::GENESIS_BITS;
 
-    fn hex(b: &[u8]) -> String {
-        b.iter().map(|x| format!("{x:02x}")).collect()
-    }
-
     fn base() -> Header {
         Header {
             version: 1,
@@ -50,13 +46,13 @@ mod tests {
             tx_root: [0x22; 32],
             state_root: [0x33; 32],
             chain: [0x44; 32],
+            sample: [0; 32],
         }
     }
 
     #[test]
     fn test_header_fails_its_own_target() {
         let h = base();
-        assert_eq!(h.id()[31], 0x31);
         assert!(!valid_pow(&h));
         let mut genesis = h;
         genesis.height = 0;
@@ -64,40 +60,20 @@ mod tests {
     }
 
     #[test]
-    fn conformance_section_5_mined_header() {
-        let mut h = base();
-        h.bits = GENESIS_BITS;
-        h.time = 1_793_885_850;
-        h.nonce = 934_636u128.to_le_bytes();
-        let bytes = h.encode();
-        assert_eq!(
-            hex(&bytes[..40]),
-            "010000000100000000000000" // version, height
-                .to_string()
-                + "9a86ec6a00000000"
-                + "0000011e"
-                + "ec420e00000000000000000000000000"
-        );
-        assert_eq!(hex(&h.id()), "a3dc0cdb7c69e1d4986c388effe1612613b1b71f2c2ca49084bc0730da000000");
-        assert!(valid_pow(&h));
-        let mut harder = h;
-        harder.bits = 0x1d10_0000;
-        assert!(!valid_pow(&harder), "2^228 needs byte 28 below 0x10; it is 0xda");
-        let mut previous_nonce = h;
-        previous_nonce.nonce = 934_635u128.to_le_bytes();
-        assert!(!valid_pow(&previous_nonce));
-    }
-
-    #[test]
     fn work_and_chainwork() {
+        // chain-conformance §5 amended 2026-11-04: work in attempts, each a sample
         let mut h = base();
         h.bits = GENESIS_BITS;
-        assert_eq!(work(&h), U256::from_u64(16_777_215));
+        assert_eq!(work(&h), U256::from_u64(127), "2^249: 127 expected attempts");
         let mut acc = U256::ZERO;
         for _ in 0..3 {
             acc = chainwork(acc, &h);
         }
-        assert_eq!(acc, U256::from_u64(50_331_645));
+        assert_eq!(acc, U256::from_u64(381));
         assert_eq!(chainwork(U256::MAX, &h), U256::MAX);
+        h.bits = super::super::params::POW_LIMIT_BITS;
+        assert_eq!(work(&h), U256::from_u64(15), "2^252: 15");
+        h.bits = 0x1e01_0000;
+        assert_eq!(work(&h), U256::from_u64(16_777_215), "2^232 stays a canonical example");
     }
 }

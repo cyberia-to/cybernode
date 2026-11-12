@@ -68,9 +68,10 @@ async fn on_header(inner: Arc<Inner>, from: EndpointId, header: Header) {
     let id = header.id();
     match inner.chain.accept_header(&header, now_unix()) {
         Ok(HeaderVerdict::Accepted) => {
+            // relayed only once its sample has verified with its body
+            // (chain.md §5.5 amended: relay after step 8; chain-wire §2)
             inner.say(&format!("header {} at {} from {}", super::codec::hex(&id[..4]), header.height, short(&from)));
             inner.note_relayed(id);
-            let _ = inner.headers_tx.broadcast_neighbors(bytes::Bytes::from(Frame::HeaderGossip(header).encode())).await;
             if let Some(p) = inner.peers.lock().expect("peers").get_mut(&from) {
                 if header.height > p.best_height {
                     p.best_height = header.height;
@@ -157,7 +158,14 @@ pub(crate) async fn apply_fetched(inner: &Arc<Inner>, conn: &radio::endpoint::Co
     let mut rounds = 0;
     while let Some((header, body)) = pending.pop() {
         match inner.chain.accept_block(&header, &body, now_unix()) {
-            Ok(BlockVerdict::NewTip) | Ok(BlockVerdict::Stored) => {
+            Ok(BlockVerdict::NewTip) => {
+                inner.peers.lock().expect("peers").note_served(&from);
+                // the sample verified with the body: relay the header now
+                inner.note_relayed(header.id());
+                let _ = inner.headers_tx.broadcast_neighbors(bytes::Bytes::from(Frame::HeaderGossip(header).encode())).await;
+                let _ = inner.sync_hint.try_send(super::sync::Hint::Tick);
+            }
+            Ok(BlockVerdict::Stored) => {
                 inner.peers.lock().expect("peers").note_served(&from);
                 let _ = inner.sync_hint.try_send(super::sync::Hint::Tick);
             }
@@ -203,7 +211,7 @@ pub(crate) async fn apply_fetched(inner: &Arc<Inner>, conn: &radio::endpoint::Co
                 let _ = inner.sync_hint.try_send(super::sync::Hint::Peer(from));
                 return;
             }
-            Err(e @ (BlockError::Held | BlockError::Refused(_) | BlockError::Store(_))) => {
+            Err(e @ (BlockError::Held | BlockError::Waiting(_) | BlockError::Refused(_) | BlockError::Store(_))) => {
                 inner.say(&format!("block {} from {}: {e}", header.height, short(&from)));
                 return;
             }

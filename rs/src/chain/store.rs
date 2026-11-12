@@ -1,8 +1,11 @@
 //! Chain store on fjall (§3.6): headers are permanent and carry their
 //! chainwork and status, bodies and undo journals are keyed by block id,
 //! the main chain is a height → id table. An in-memory index mirrors the
-//! headers partition (168 B + 33 B per header: ~200 MB per million blocks)
-//! so fork choice never reads disk.
+//! headers partition (200 B + 41 B per header: ~240 MB per million blocks)
+//! so fork choice never reads disk. The entry grew 209 → 241 bytes with the
+//! 200-byte header (rewards.md §7), so a store written before this change
+//! does not parse and the node re-syncs from genesis (R18-12); there is no
+//! chain in production yet, so no migration is owed.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -10,6 +13,7 @@ use std::path::Path;
 use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle, PersistMode};
 
 use super::header::{BlockId, Header};
+use super::params::HEADER_BYTES;
 use super::state::Undo;
 use super::u256::U256;
 
@@ -71,14 +75,14 @@ fn entry_bytes(e: &Entry) -> Vec<u8> {
 }
 
 fn entry_from(b: &[u8]) -> Option<Entry> {
-    if b.len() != 168 + 32 + 1 + 8 {
+    if b.len() != HEADER_BYTES + 32 + 1 + 8 {
         return None;
     }
     Some(Entry {
-        header: Header::decode_raw(&b[..168]).ok()?,
-        chainwork: U256::from_le_bytes(b[168..200].try_into().ok()?),
-        status: Status::from_u8(b[200])?,
-        seq: u64::from_le_bytes(b[201..209].try_into().ok()?),
+        header: Header::decode_raw(&b[..HEADER_BYTES]).ok()?,
+        chainwork: U256::from_le_bytes(b[HEADER_BYTES..HEADER_BYTES + 32].try_into().ok()?),
+        status: Status::from_u8(b[HEADER_BYTES + 32])?,
+        seq: u64::from_le_bytes(b[HEADER_BYTES + 33..HEADER_BYTES + 41].try_into().ok()?),
     })
 }
 
@@ -162,6 +166,21 @@ impl Store {
         self.undo.get(id).ok().flatten().and_then(|v| Undo::decode(&v))
     }
 
+    /// Forget an entry that never reached the main chain: its header, body
+    /// and index row are removed, so the store can evict unverified headers
+    /// (R18-15). Refuses a main-chain or applied (`Valid`) entry.
+    pub fn forget(&mut self, id: &BlockId) -> Result<(), String> {
+        match self.index.get(id) {
+            None => return Ok(()),
+            Some(e) if e.status == Status::Valid || self.on_main(id) => return Err("cannot forget an applied or main-chain block".into()),
+            Some(_) => {}
+        }
+        self.headers.remove(*id).map_err(err)?;
+        self.bodies.remove(*id).map_err(err)?;
+        self.index.remove(id);
+        Ok(())
+    }
+
     /// Main-chain id at `height`.
     pub fn main_at(&self, height: u64) -> Option<BlockId> {
         self.chain.get(height as usize).copied()
@@ -242,7 +261,7 @@ mod tests {
     }
 
     fn header(height: u64, prev: BlockId, time: u64) -> Header {
-        Header { version: 1, height, time, bits: 0x1e01_0000, nonce: [0; 16], prev, tx_root: [1; 32], state_root: [2; 32], chain: [3; 32] }
+        Header { version: 1, height, time, bits: 0x1e01_0000, nonce: [0; 16], prev, tx_root: [1; 32], state_root: [2; 32], chain: [3; 32], sample: [0; 32] }
     }
 
     #[test]

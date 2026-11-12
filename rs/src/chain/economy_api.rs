@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use super::economy::{focus_key, stake_key};
 use super::engine::Chain;
+use super::params::K_MIN;
 use super::state::{Id, StateBackend};
 
 fn hex(b: &[u8]) -> String {
@@ -26,6 +27,31 @@ impl Chain {
             "focus_bps": r.focus_bps, "budget": r.budget, "paid": r.paid, "pool_after": r.pool_after, "rewarded": r.rewarded,
             "payouts_root": hex(&r.payouts), "digest": hex(&r.digest()), "record": hex(&r.encode()),
             "payouts": o.payouts.iter().map(|(c, owner, a)| json!({"card": hex(c), "owner": hex(owner), "amount": a})).collect::<Vec<_>>(),
+        }))
+    }
+
+    /// `GET /epoch/{E}/lottery` (chain-economy §11 amended; rewards.md §7
+    /// "the payout"): the window's samples of epoch `e`'s game — per
+    /// player `k`, the mean and its standard error, the exact path
+    /// gradient, `a(c)` and the share `â(c)` paid, nats at 2^60 as decimal
+    /// strings — beside `v(N)` and the counts; from the settlement this
+    /// node computed. `None` before the epoch is settled on the main chain
+    /// or when this node holds no estimate for it (a replay from the cache
+    /// file carries one; a node that never settled it does not).
+    pub fn lottery_json(&self, e: u64) -> Option<Value> {
+        let c = self.rules.clock;
+        if e == 0 {
+            return None;
+        }
+        let (prev, cur, end) = (self.store.main_at(c.boundary(e - 1))?, self.store.main_at(c.boundary(e))?, self.store.main_at(c.boundary(e + 1))?);
+        let r = self.economy.lottery_of(&prev, &cur, &end)?;
+        Some(json!({
+            "epoch": e, "beacon": hex(&cur), "window_end": hex(&end), "settled_at": c.settle(e),
+            "value": r.value.to_string(), "players": r.players, "samples": r.samples, "by_mean": r.by_mean, "k_min": K_MIN,
+            "estimates": r.lottery.iter().map(|p| json!({
+                "card": hex(&p.card), "side": p.side, "k": p.k, "mean": p.mean.to_string(), "stderr": p.stderr.to_string(),
+                "exact": p.exact.to_string(), "a": p.a.to_string(), "paid": p.paid.to_string(),
+            })).collect::<Vec<_>>(),
         }))
     }
 

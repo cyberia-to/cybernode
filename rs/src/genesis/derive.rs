@@ -324,7 +324,7 @@ pub fn derive(chain: &Chain, snap: &Snapshot, time: u64) -> io::Result<Derived> 
         hrp: chain.hrp.into(),
         denom: native.into(),
         time,
-        bits: file::GENESIS_BITS,
+        bits: file::genesis_bits(chain.name),
         subsidy: file::subsidy_of(s0)?,
         checkpoint_key: [0u8; 33],
         checkpoint_sunset: file::CHECKPOINT_SUNSET,

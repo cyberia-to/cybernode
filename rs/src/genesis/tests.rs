@@ -44,13 +44,12 @@ fn hemera_anchors_of_chain_conformance_section_1() {
 
 #[test]
 fn header_vector_of_chain_conformance_section_5() {
-    let h = file::header_bytes(1, 1, 1_762_349_000, 0x1d10_0000, [0u8; 16], &[0x11; 32], &[0x22; 32], &[0x33; 32], &[0x44; 32]);
+    let h = file::header_bytes(1, 1, 1_762_349_000, 0x1d10_0000, [0u8; 16], &[0x11; 32], &[0x22; 32], &[0x33; 32], &[0x44; 32], &[0x55; 32]);
     assert_eq!(&h[..24], &unhex(concat!("01000000", "0100000000000000", "c84f0b6900000000", "0000101d")).unwrap()[..]);
-    assert_eq!(hex(&file::block_id(&h)), "bdd7f2ef3a5a1c573b8d84a7a2aeedc95c6f8aa2139eea5c83946b33c4180c31");
-    let mut nonce = [0u8; 16];
-    nonce[..8].copy_from_slice(&934_636u64.to_le_bytes());
-    let h = file::header_bytes(1, 1, 1_793_885_850, 0x1e01_0000, nonce, &[0x11; 32], &[0x22; 32], &[0x33; 32], &[0x44; 32]);
-    assert_eq!(hex(&file::block_id(&h)), "a3dc0cdb7c69e1d4986c388effe1612613b1b71f2c2ca49084bc0730da000000");
+    assert_eq!(&h[168..], &[0x55u8; 32]);
+    // the old 168-byte header stays a hemera anchor; the 200-byte id is the chain's
+    assert_eq!(hex(&hash32(&h[..168])), "bdd7f2ef3a5a1c573b8d84a7a2aeedc95c6f8aa2139eea5c83946b33c4180c31");
+    assert_eq!(hex(&file::block_id(&h)), crate::chain::header::tests::TEST_HEADER_ID);
 }
 
 #[test]
@@ -84,7 +83,7 @@ fn sample() -> GenesisFile {
         hrp: "pussy".into(),
         denom: "pussy".into(),
         time: 1_793_885_820,
-        bits: file::GENESIS_BITS,
+        bits: file::genesis_bits("pussy"),
         subsidy: file::subsidy_of(1_000_000).unwrap(),
         checkpoint_key: [0u8; 33],
         checkpoint_sunset: file::CHECKPOINT_SUNSET,
@@ -132,7 +131,8 @@ fn conformance_net_genesis_of_section_8() {
     assert_eq!(s.balances[&bbg::balance_key(&[0x66; 32], &token_of("pussy"))], 1_000_000);
     let root = s.root();
     let particle = hash32(&bytes);
-    let header = file::block0_header(g.params.time, &root, &particle);
+    let header = file::block0_header(g.params.time, g.params.bits, &root, &particle);
+    assert_eq!(&header[20..24], &0x2002_0000u32.to_le_bytes(), "pussy anchors at 2^249");
     assert_eq!(&header[72..104], &particle);
     assert_eq!(&header[136..168], &particle);
     assert_eq!(&header[104..136], &root);
@@ -187,7 +187,7 @@ fn pussy_genesis_is_deterministic_conserving_and_bijective() {
     let g = GenesisFile::decode(&bytes).unwrap();
     assert_eq!(g.params.time, 1_793_885_820);
     assert_eq!(g.params.name, "pussy");
-    assert_eq!(g.params.bits, 0x1e01_0000);
+    assert_eq!(g.params.bits, 0x2002_0000, "pussy's GENESIS_BITS, 2^249 (chain.md §0 amended 2026-11-04)");
     let count = |k: &str| *ra.counts.get(k).unwrap_or_else(|| panic!("count {k}"));
 
     // conservation: Σ per token == supply.json, S0 == bank supply at halt

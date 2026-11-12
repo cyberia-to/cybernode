@@ -22,13 +22,10 @@ path = "src/bin/cybernode.rs"
 [workspace]
 
 [features]
-# the reference miner ships with its GPU backends (specs/chain.md §8: the
-# first competent GPU kernel is the majority miner, so it must not be a secret)
-default = ["metal", "webgpu"]
-# `cybernode mine --backend metal`: hemera_mine on the Apple GPU (Apple Silicon macOS; a no-op elsewhere, Intel macs included)
-metal = ["dep:cyber-lens-gpu", "cyber-lens-gpu/metal"]
-# `cybernode mine --backend webgpu`: hemera_mine through wgpu (Vulkan, DX12, Metal, GL)
-webgpu = ["dep:cyber-lens-gpu", "cyber-lens-gpu/webgpu"]
+# the reference miner has no GPU backend: an attempt is a settlement ticket
+# (W_TICKET + 1 solves of the epoch engine over the staked graph), and the
+# whole template seeds it, so no hash is free to grind (rewards.md §7, §16)
+default = []
 # chain-conformance.md sections 1-9: vectors as tests (`cargo test --features chain-conformance`)
 chain-conformance = []
 # out-of-tree simulators (cyberia-to/simulation): `params::sim_pow`, a
@@ -40,8 +37,6 @@ sim = []
 cybergraph = { version = "0.1.1", path = "../../cybergraph", features = ["local-storage"] }
 foculus = { version = "0.1.1", path = "../../foculus", default-features = false }
 hemera = { package = "cyber-hemera", version = "0.4", path = "../../hemera/rs" }
-# header mining kernels (Metal, WebGPU) — lens release/0.2 `gpu/`
-cyber-lens-gpu = { version = "0.1.1", path = "../../lens/gpu", optional = true }
 # φ*, J and the syntropy gradient of the focus economy (chain-economy §4–§5;
 # tru specs/epoch.md): the epoch engine every full node runs at settlement
 tru = { package = "cyber-tru", version = "0.1", path = "../../tru/rs" }
