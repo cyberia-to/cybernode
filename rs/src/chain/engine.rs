@@ -102,6 +102,9 @@ pub struct Chain {
     pub(super) verify_ema_ms: u64,
     /// a pinned budget (tests only); `None` follows the EMA
     pub(super) v_budget_pinned: Option<usize>,
+    /// the block the verifier last verified: its child continues the branch
+    /// for free; `None` after a failure (the next attempt costs a slot)
+    pub(super) walking: Option<BlockId>,
 }
 
 /// The launch chains: they run the spec's epoch clock and nothing else.
@@ -254,6 +257,7 @@ impl Chain {
             arrivals: HashMap::new(),
             verify_ema_ms,
             v_budget_pinned: None,
+            walking: None,
         };
         chain.reverts.check_store(&chain.store).map_err(|e| ChainError::Store(format!("revert table: {e}")))?;
         chain.apply_reverts(home)?;
@@ -465,8 +469,9 @@ impl Chain {
         Some(Lottery { game, tickets })
     }
 
-    /// `V_BUDGET` on (live tip) or off (replay, initial download). R18-2.
-    pub(super) fn set_budget_on(&mut self, on: bool) {
+    /// `V_BUDGET` on or off (replay switches it off itself; tests pin it on).
+    #[cfg(test)]
+    pub(crate) fn set_budget_on(&mut self, on: bool) {
         self.budget_on = on;
     }
 
@@ -476,10 +481,10 @@ impl Chain {
         self.v_budget_pinned = Some(b.max(1));
     }
 
-    /// Is the node catching up at `height` (the PoW-valid chain's length)?
+    /// The branch the verifier is walking (the last block it verified).
     #[cfg(test)]
-    pub(crate) fn catching_up_for_test(&self, height: u64) -> bool {
-        self.catching_up(height)
+    pub(crate) fn walking_for_test(&self) -> Option<BlockId> {
+        self.walking
     }
 
     /// Verifications spent in the open window, and the unverified set above
@@ -508,12 +513,13 @@ impl Chain {
             .count()
     }
 
-    /// Make room in the unverified set (R18-15): forget every header that has
-    /// waited for its body longer than one interval, then, while the set is
-    /// at `UNVERIFIED_CAP`, forget the entry of lowest chainwork — among
-    /// equals a header without a body before one with, then the oldest. A
-    /// forgotten header is not remembered as rejected: re-offering it costs
-    /// its sender the work again, and the store never grows past the cap.
+    /// Make room in the unverified set (R18-15; chain.md §5.4 amended): forget
+    /// every header that has waited for its body longer than one interval,
+    /// then, while the set is at `UNVERIFIED_CAP`, forget an entry chosen by
+    /// the node's local draw — never by claimed chainwork or length, which
+    /// would let a forged heavy tail outlive honest headers. A forgotten
+    /// header is not remembered as rejected: re-offering it costs its sender
+    /// the work again, and the store never grows past the cap.
     pub(super) fn evict_unverified(&mut self) {
         let now = Instant::now();
         let interval = Duration::from_secs(BLOCK_TIME as u64);
@@ -533,7 +539,7 @@ impl Chain {
                 .store
                 .iter()
                 .filter(|(id, e)| unverified(id, e, self.store.on_main(id)))
-                .min_by_key(|(_, e)| (e.chainwork, u8::from(e.status == store::Status::Body), e.seq))
+                .min_by_key(|(id, _)| hash32(&[&self.tie_salt[..], &id[..]].concat()))
                 .map(|(id, _)| *id);
             match victim {
                 Some(id) => self.forget_unverified(&id),
@@ -547,29 +553,6 @@ impl Chain {
             self.arrivals.remove(id);
             self.heaviest = self.store.iter().filter(|(_, e)| e.status != store::Status::Invalid).map(|(_, e)| e.chainwork).max().unwrap_or(U256::ZERO);
         }
-    }
-
-    /// The height of the best header this node holds whose PoW id passed the
-    /// target and which is backed by a contiguous chain of PoW-valid headers
-    /// from the tip (chain-wire §3.1 header-first sync's own check: the store
-    /// admits a header only after steps 1–5 with its parent known).
-    pub(super) fn best_pow_height(&self) -> u64 {
-        self.store.iter().filter(|(_, e)| e.status != store::Status::Invalid).map(|(_, e)| e.header.height).max().unwrap_or(0)
-    }
-
-    /// Is the node catching up at `height` (R18-14; tru#45 020c020, §7's
-    /// scope sentence)? Yes when the block being verified is more than D
-    /// below the best PoW-valid header it has received — decided by the
-    /// PoW-valid header chain's length, never by applied state (an applied
-    /// header above the tip does not exist while syncing). The bound: a
-    /// forged body-less flood above the tip cannot make a contiguous
-    /// PoW-valid chain longer than D without paying `D × 2^256/target`
-    /// hashes, one target-passing header per height, so a flood at the tip
-    /// never switches the budget off, and blocks more than D below the best
-    /// header (replay, initial download, bodies of a long chain) verify at
-    /// full speed.
-    pub(super) fn catching_up(&self, height: u64) -> bool {
-        self.best_pow_height() > height + FINALITY_DEPTH
     }
 
     /// The budget in force: the pinned one (tests) or `⌊0.5·T / t_verify⌋`
@@ -623,9 +606,19 @@ impl Chain {
             return Err(ChainError::Block(apply::BlockError::Sample("the sample is zero".into())));
         }
         let game = self.game_for(&header.prev, header.height)?;
-        // the budget is for competing tips: a block more than D below the best
-        // PoW-valid header is catch-up and verifies at full speed (R18-14)
-        if self.budget_on && !self.catching_up(header.height) && !self.economy.tickets.is_cached(header) {
+        // `V_BUDGET` counts branch attempts per interval, not blocks (R18-14,
+        // tru#45 §7): the verifier walks one branch from its verified tip and
+        // each success extends the tip at once — the next block of the same
+        // branch continues for free, which is replay and initial download at
+        // full speed; the first failure drops the branch and its descendants;
+        // starting on another branch (a block whose parent is not the block
+        // just verified, or any block after a failure) costs one slot. A
+        // flood of forged headers at the tip is one branch attempt each, one
+        // free after an honest success, so at most `V_BUDGET + 1`
+        // recomputations per interval, and no chain length or claimed work
+        // buys an exemption.
+        let continuing = self.walking == Some(header.prev);
+        if self.budget_on && !continuing && !self.economy.tickets.is_cached(header) {
             let now = Instant::now();
             let interval = Duration::from_secs(BLOCK_TIME as u64);
             while self.verifications.front().is_some_and(|t| now.duration_since(*t) >= interval) {
@@ -647,6 +640,7 @@ impl Chain {
             let ms = (t0.elapsed().as_millis() as u64).max(1);
             self.verify_ema_ms = (self.verify_ema_ms * 7 + ms) / 8;
         }
+        self.walking = if out.is_ok() { Some(header.id()) } else { None };
         out
     }
 
@@ -733,6 +727,25 @@ impl Chain {
         let _ = self.store.set_status(&id, store::Status::Invalid);
         self.arrivals.remove(&id);
         self.remember_rejected(id);
+    }
+
+    /// Invalidate `id` and every stored descendant: a branch whose ticket
+    /// failed is dead to its end, and a heavy body-less tail above a dead
+    /// root never counts again (R18-14).
+    pub(super) fn invalidate_subtree(&mut self, id: BlockId) {
+        let Some(h) = self.entry(&id).map(|e| e.header.height) else { return };
+        let below: Vec<BlockId> = self
+            .store
+            .iter()
+            .filter(|(_, e)| e.status != store::Status::Invalid && e.header.height > h)
+            .filter(|(d, _)| self.store.ancestor_at(d, h) == Some(id))
+            .map(|(d, _)| *d)
+            .collect();
+        self.invalidate(id);
+        for d in below {
+            self.invalidate(d);
+        }
+        self.heaviest = self.store.iter().filter(|(_, e)| e.status != store::Status::Invalid).map(|(_, e)| e.chainwork).max().unwrap_or(U256::ZERO);
     }
 
     /// Invalid for contradicting a held checkpoint (see `vetoed`).
@@ -899,7 +912,9 @@ impl Chain {
             // fault (chain-economy §2.5: it waits)
             Err(e) if !e.is_blocks_fault() => return Err(e),
             Err(e) => {
-                self.invalidate(id);
+                // the branch is dropped at its first failed ticket, with every
+                // stored descendant (R18-14): none of them is verified again
+                self.invalidate_subtree(id);
                 return Err(e);
             }
         };
@@ -976,10 +991,51 @@ impl Chain {
         if !select::heavier(self.heaviest, tip_work) {
             return Ok(BlockVerdict::Known);
         }
+        // 1. the branches rooted at the verified tip, in the node's local
+        //    draw order and nothing else (tru#45 §7, chain.md §5.4 amended):
+        //    claimed chainwork or length never orders an unverified branch,
+        //    or a long body-less forged chain would outrank honest successors.
+        //    The walker verifies one branch sequentially, each success
+        //    extending the tip at once; the first failure drops the branch.
+        let mut roots: Vec<([u8; 32], BlockId)> = self
+            .store
+            .iter()
+            .filter(|(id, e)| e.header.prev == tip && e.status != store::Status::Invalid && !self.store.on_main(id))
+            .map(|(id, _)| (hash32(&[&self.tie_salt[..], &id[..]].concat()), *id))
+            .collect();
+        roots.sort();
+        let mut missing = Vec::new();
+        let mut last_fault = None;
+        for (_, root) in roots {
+            match self.walk_branch(root) {
+                Ok(Some(v)) => return Ok(v),
+                Ok(None) => {
+                    // the root has no body: name every body the branch's best
+                    // known path lacks, oldest first, for header-first sync
+                    let h = self.entry(&root).map(|e| e.header.height).unwrap_or(0);
+                    let best = self
+                        .store
+                        .iter()
+                        .filter(|(id, e)| e.status != store::Status::Invalid && (**id == root || (e.header.height > h && self.store.ancestor_at(id, h) == Some(root))))
+                        .max_by_key(|(_, e)| (e.chainwork, std::cmp::Reverse(e.seq)))
+                        .map(|(id, _)| *id)
+                        .unwrap_or(root);
+                    let (_, path) = self.path_from_main(&best)?;
+                    missing.extend(path.iter().filter(|id| !self.store.has_body(id)).copied());
+                }
+                Err(e) if e.is_blocks_fault() => last_fault = Some(e),
+                Err(e) => return Err(e),
+            }
+        }
+        // 2. deeper forks: a whole path whose bodies are all present, by
+        //    verified chainwork order among applied candidates
         let mut first_error = None;
         for best in self.candidates() {
             let (fork_height, path) = self.path_from_main(&best)?;
             let tip_height = self.store.tip_height();
+            if fork_height == tip_height {
+                continue; // a branch of the tip: the walker's, above
+            }
             if !select::reorg_allowed(tip_height, fork_height) {
                 first_error.get_or_insert(ChainError::DeepFork { fork_height, tip_height });
                 continue;
@@ -1000,17 +1056,65 @@ impl Chain {
                 first_error.get_or_insert(ChainError::Checkpoint { height, expected });
                 continue;
             }
-            let missing: Vec<BlockId> = path.iter().filter(|id| !self.store.has_body(id)).copied().collect();
-            if !missing.is_empty() {
-                return Ok(BlockVerdict::NeedBodies(missing));
+            let missing_here: Vec<BlockId> = path.iter().filter(|id| !self.store.has_body(id)).copied().collect();
+            if !missing_here.is_empty() {
+                missing.extend(missing_here);
+                continue;
             }
             return self.reorg(fork_height, &path);
         }
-        match first_error {
-            Some(e) => Err(e),
-            None => Ok(BlockVerdict::Stored),
+        if !missing.is_empty() {
+            return Ok(BlockVerdict::NeedBodies(missing));
+        }
+        match (first_error, last_fault) {
+            (Some(e), _) | (None, Some(e)) => Err(e),
+            (None, None) => Ok(BlockVerdict::Stored),
         }
     }
+
+    /// Walk one branch from the verified tip (R18-14, tru#45 §7): apply the
+    /// root and then, while a child with a body exists (chosen by the local
+    /// draw among siblings), the next block — each success extends the tip
+    /// at once. `Ok(None)`: the root has no body yet. `Ok(Some(_))`: at
+    /// least one block applied. `Err`: the root failed (a sample or body
+    /// fault drops the whole branch; a spent budget leaves it waiting).
+    fn walk_branch(&mut self, root: BlockId) -> Result<Option<BlockVerdict>, ChainError> {
+        let mut cur = root;
+        let mut applied = false;
+        loop {
+            if !self.store.has_body(&cur) {
+                return Ok(applied.then_some(BlockVerdict::Extended));
+            }
+            let (header, txs) = match self.decoded(&cur) {
+                Ok(d) => d,
+                Err(e) => {
+                    if e.is_blocks_fault() {
+                        self.invalidate_subtree(cur);
+                    }
+                    return if applied { Ok(Some(BlockVerdict::Extended)) } else { Err(e) };
+                }
+            };
+            match self.extend(&header, &txs) {
+                Ok(()) => {
+                    applied = true;
+                    self.after_tip_move()?;
+                }
+                Err(e) => return if applied { Ok(Some(BlockVerdict::Extended)) } else { Err(e) },
+            }
+            let next = self
+                .store
+                .iter()
+                .filter(|(id, e)| e.header.prev == cur && e.status != store::Status::Invalid && self.store.has_body(id))
+                .map(|(id, _)| (hash32(&[&self.tie_salt[..], &id[..]].concat()), *id))
+                .min()
+                .map(|(_, id)| id);
+            match next {
+                Some(id) => cur = id,
+                None => return Ok(Some(BlockVerdict::Extended)),
+            }
+        }
+    }
+
 
     /// The heaviest non-invalid header whose chain the node may still move
     /// to — the target of header-first body download (chain-wire §3.2) —

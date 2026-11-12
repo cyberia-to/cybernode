@@ -246,3 +246,33 @@ Every id of cybernode#18's review (R18-1…R18-12) disposed on `feat/ticket-pow`
   (`Chain::effective_v_budget`); the receipt's 8 s is a measurement, not a
   limit.
 - R18-13 — wording for tru#45, relayed by the coordinator.
+
+## P15b · R18-14, third cut — the branch walker (2026-11-12)
+
+The PoW-valid-chain-length cut was red too: D+1 body-less forged headers
+cost ≈ 15–30k hashes and switched the budget off. Per the rule tru#45 is
+writing into §7 (with its addenda): no catch-up exemption at all.
+- `V_BUDGET` counts **branch attempts** per interval, not blocks: the
+  verifier walks one branch from its verified tip (`Chain::walk_branch`),
+  each success extends the tip at once and the next block of the branch is
+  free (`walking`) — that is replay and initial download at full speed;
+  the first failure drops the branch and every stored descendant
+  (`invalidate_subtree`, never verified again); starting on another branch
+  costs one slot. Bound: at most `V + 1` recomputations an interval (one
+  free continuation after an honest success).
+- branches rooted at the verified tip are ordered by the node's **local
+  draw only** — never by claimed chainwork or length (a D+1 body-less chain
+  would outrank honest successors); only verified chainwork orders deeper
+  forks. `accept_block` no longer applies a tip-extending block directly:
+  every branch goes through the walker.
+- the orphan/unverified store evicts by age (body-less older than one
+  interval) and then by the local draw, never by PoW weight (chain.md §5.4
+  amended).
+- tests: `initial_sync_verifies_at_full_speed_beyond_d` (a fresh node syncs
+  a 2·D+50 chain with the budget at 1: one branch attempt, every later block
+  free); the flood test (2×cap forgeries: `V + 1` recomputations, the store
+  at the cap, the honest branch served within `⌈(cap + 1)/V⌉` windows by the
+  draw). The F-long-forged-chains test could not be produced in this
+  session: its construction was stopped twice by the assistant's safety
+  classifier; the walker's subtree invalidation is exercised by the single-
+  height flood and the rule is stated in the code doc.

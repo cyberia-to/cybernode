@@ -612,14 +612,6 @@ impl ChainView for KernelChain {
         let min_epoch = inner.chain.rules().clock.game_of(tip + 1).saturating_sub(1);
         inner.chain.economy.tickets.game_json(beacon, min_epoch).map(|j| j.to_string())
     }
-    fn set_verify_budget(&self, on: bool) {
-        self.lock().chain.set_budget_on(on);
-    }
-    fn catching_up(&self) -> bool {
-        let inner = self.lock();
-        let next = inner.chain.tip().header.height + 1;
-        inner.chain.catching_up(next)
-    }
     fn retry_waiting(&self) {
         let mut inner = self.lock();
         if inner.chain.budget_spent {

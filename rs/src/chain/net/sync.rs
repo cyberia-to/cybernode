@@ -87,14 +87,12 @@ async fn pass(inner: &Arc<Inner>, preferred: Option<EndpointId>, refresh: bool) 
             break;
         }
     }
-    // off the budget only while catching up (R18-2, R18-14): the next block is
-    // more than D below the best PoW-valid header chain — a flood at the tip
-    // cannot forge such a chain without D × target hashes
-    inner.chain.set_verify_budget(!inner.chain.catching_up());
+    // no catch-up exemption from V_BUDGET (R18-14, tru#45 §7): the budget
+    // counts branch attempts, and a branch walked from the verified tip
+    // continues for free, which is what makes initial download full speed
     body_sync(inner).await;
     let tip = inner.chain.tip();
     let best = inner.chain.best_header();
-    inner.chain.set_verify_budget(!inner.chain.catching_up());
     inner.catching_up.store(best.height > tip.height + 2, Ordering::Relaxed);
 }
 

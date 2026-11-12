@@ -72,33 +72,44 @@ fn forged_header_flood_is_bounded_by_v_budget_and_the_store_cap() {
     }
     let (spent, unverified) = c.flood_state();
     assert!(spent <= 3, "at most V_BUDGET full recomputations in the window: {spent}");
-    assert_eq!(rejected, 3, "exactly V_BUDGET forged headers were recomputed and rejected");
-    assert_eq!(waited, f - 3, "the rest waited for the window without a recomputation");
+    // V_BUDGET counts branch attempts (tru#45 §7): the first forged header
+    // continues the walk from the honest tip for free, then V cost a slot
+    assert_eq!(rejected, 4, "V + 1 recomputations: one free continuation of the honest tip, then V slots");
+    assert_eq!(waited, f - 4, "the rest waited for the window without a recomputation");
     // the store is at the cap and no further: the flood reached it and every
-    // later forgery evicted an older one (lowest chainwork, oldest first)
+    // later forgery evicted another chosen by the node's draw (chain.md §5.4
+    // amended: by age, then the local draw — never by claimed work)
     assert_eq!(unverified, UNVERIFIED_CAP, "the unverified store holds exactly the cap under a 2×cap flood");
     assert_eq!(c.tip().id, tip, "no forged header became the tip");
-    // the forged headers above the tip are unverified work: they never make
-    // the node think it is catching up, so the budget stays on (R18-14)
-    let next = c.tip().header.height + 1;
-    assert!(!c.catching_up_for_test(next), "a flood at the tip is not a PoW-valid chain longer than D: the budget stays on");
-    c.set_budget_on(true);
+    assert_eq!(c.walking_for_test(), None, "a failed ticket ends the walk: the next attempt costs a slot (R18-14)");
 
-    // the honest block of the same height is served once the budget renews —
-    // a flood delays it, it never starves it (rewards.md §7 "Verification")
-    c.renew_verify_budget();
+    // the honest block of the same height: admitted (an eviction makes room),
+    // it waits for the window, then is served within ⌈(cap + 1) / V⌉ windows
+    // — each window the walker attempts V branches in the node's draw order,
+    // a failed branch never returns, and no forged branch outranks the honest
+    // one by claimed work (rewards.md §7 "Verification"; tru#45 §7 addendum)
     let honest = block_of(&template(&mut c, miner, 0, &[]));
-    assert_eq!(c.accept_block(&honest, NOW), Ok(BlockVerdict::Extended), "the honest block is admitted (an eviction made room) and served after the window renews");
+    assert_eq!(c.accept_block(&honest, NOW), Err(ChainError::VerifyBudget), "the window is spent: the honest block is stored and waits");
+    let bound = (UNVERIFIED_CAP + 1).div_ceil(3);
+    let mut served = None;
+    for w in 1..=bound {
+        c.renew_verify_budget();
+        let _ = c.try_advance();
+        if c.tip().id == honest.id() {
+            served = Some(w);
+            break;
+        }
+    }
+    assert!(served.is_some(), "the honest branch was not served within {bound} windows");
     assert_eq!(c.tip().id, honest.id());
 }
 
-/// Initial sync verifies at full speed (R18-14; tru#45 020c020, §7's scope
-/// sentence): a fresh node joining a chain of 2·D + 50 blocks receives the
-/// PoW-valid header chain first (header-first sync, chain-wire §3.1), then
-/// the bodies; every block more than D below the best header is catch-up
-/// and spends no `V_BUDGET` slot — with a budget of one and no window
-/// renewal, all of them apply. The last D blocks are at the tip's frontier
-/// and are budgeted again (the window renews per block here).
+/// Initial sync is one branch (R18-14; tru#45 §7): a fresh node joining a
+/// chain of 2·D + 50 blocks receives the PoW-valid header chain first
+/// (header-first sync, chain-wire §3.1), then the bodies; the first body is
+/// one branch attempt and every further block continues the walk for free,
+/// so with a budget of one and no window renewal all of them apply — no
+/// catch-up exemption exists, none is needed.
 #[test]
 fn initial_sync_verifies_at_full_speed_beyond_d() {
     use crate::chain::params::FINALITY_DEPTH as D;
@@ -114,21 +125,12 @@ fn initial_sync_verifies_at_full_speed_beyond_d() {
     for blk in &chain {
         b.accept_header(&blk.header, NOW).unwrap();
     }
-    assert!(b.catching_up_for_test(1), "the next block is more than D below the best PoW-valid header");
-    // bodies: everything strictly more than D below the best header (heights
-    // 1 … best − D − 1) applies without a slot
-    let beyond = chain.len() - D as usize - 1;
-    for blk in &chain[..beyond] {
-        let v = b.accept_block(blk, NOW).unwrap_or_else(|e| panic!("height {} throttled during catch-up: {e}", blk.header.height));
+    // bodies in order: the first is one branch attempt, every later block
+    // continues the walk from the block just verified for free (tru#45 §7)
+    for blk in &chain {
+        let v = b.accept_block(blk, NOW).unwrap_or_else(|e| panic!("height {} throttled during sync: {e}", blk.header.height));
         assert!(matches!(v, BlockVerdict::Extended | BlockVerdict::Reorganized { .. }), "{v:?}");
     }
-    assert_eq!(b.tip().header.height, beyond as u64);
-    assert_eq!(b.flood_state().0, 0, "catch-up spent no verification slot");
-    // the frontier: the last D blocks are budgeted again (one per renewed window)
-    for blk in &chain[beyond..] {
-        assert!(!b.catching_up_for_test(blk.header.height), "within D of the best header: the tip's rule");
-        b.renew_verify_budget();
-        b.accept_block(blk, NOW).unwrap();
-    }
     assert_eq!(b.tip().id, a.tip().id);
+    assert_eq!(b.flood_state().0, 1, "one branch attempt for the whole chain");
 }
