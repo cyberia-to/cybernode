@@ -196,6 +196,12 @@ impl EpochGame {
         let prev: Vec<TruAxon> = base.iter().map(|(p, q, w)| TruAxon { from: *p, to: *q, weight: *w }).collect();
         let changes: Vec<Change> = players.iter().map(Player::change).collect();
         let game = Game::new(&prev, &changes, &params).map_err(|e| e.to_string())?;
+        // the probe modulus is `self.base.len()`; tru's `Game` canonicalises
+        // its base (drops self-loops), so the two must agree or a probe would
+        // index an axon the game does not have (R18-12). The launch genesis
+        // graphs carry no self-loop, so this holds; the assert catches a
+        // future graph that does.
+        assert_eq!(base.len(), game.base().len(), "the base must be canonical: no self-loop axons");
         Ok(EpochGame { epoch, beacon, cluster: cluster_id(&players), players, width, base, game })
     }
 
@@ -387,10 +393,15 @@ impl GameWire {
 
 // ── the ticket as a cache record ───────────────────────────────────────
 
-const MAGIC: &[u8; 8] = b"S3TCKT01";
+const MAGIC: &[u8; 8] = b"S3TCKT02";
 
 /// A verified ticket's bytes: everything the commitment and the settlement
-/// read (the ordering is implied by the nonce and not stored).
+/// read (the ordering is implied by the nonce and not stored), with a hemera
+/// checksum trailer. The header's `sample` commits only to the marginal and
+/// probe values (`Ticket::preimage`), so a cached record's `covered`, `rank`
+/// and probe `axon/t/u` are bound by this checksum instead — a flipped bit
+/// in any of them is rejected on load rather than paying the wrong player at
+/// settlement (R18-7).
 pub fn encode_ticket(t: &Ticket) -> Vec<u8> {
     let mut out = MAGIC.to_vec();
     out.extend_from_slice(&t.nonce.to_le_bytes());
@@ -407,10 +418,18 @@ pub fn encode_ticket(t: &Ticket) -> Vec<u8> {
         out.extend_from_slice(&p.u.to_le_bytes());
         out.extend_from_slice(&p.value.to_le_bytes());
     }
+    let sum = hash32(&out);
+    out.extend_from_slice(&sum);
     out
 }
 
 pub fn decode_ticket(b: &[u8]) -> Option<Ticket> {
+    // the checksum binds every field (R18-7): split it off and compare
+    let body = b.get(..b.len().checked_sub(32)?)?;
+    if hash32(body)[..] != b[body.len()..] {
+        return None;
+    }
+    let b = body;
     let mut at = 0usize;
     let mut take = |n: usize| -> Option<&[u8]> {
         let s = b.get(at..at + n)?;

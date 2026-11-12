@@ -2,7 +2,10 @@
 //! chainwork and status, bodies and undo journals are keyed by block id,
 //! the main chain is a height → id table. An in-memory index mirrors the
 //! headers partition (200 B + 41 B per header: ~240 MB per million blocks)
-//! so fork choice never reads disk.
+//! so fork choice never reads disk. The entry grew 209 → 241 bytes with the
+//! 200-byte header (rewards.md §7), so a store written before this change
+//! does not parse and the node re-syncs from genesis (R18-12); there is no
+//! chain in production yet, so no migration is owed.
 
 use std::collections::HashMap;
 use std::path::Path;
