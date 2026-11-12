@@ -1063,12 +1063,19 @@ impl Chain {
             }
             return self.reorg(fork_height, &path);
         }
+        // a root whose sample failed is reported before any missing body
+        // (R18-17): its sender's +100 and ban must never be lost to another
+        // root's state; the bodies still wanted are re-asked by the sync
+        // pass through `missing_bodies`
+        if let Some(e) = last_fault {
+            return Err(e);
+        }
         if !missing.is_empty() {
             return Ok(BlockVerdict::NeedBodies(missing));
         }
-        match (first_error, last_fault) {
-            (Some(e), _) | (None, Some(e)) => Err(e),
-            (None, None) => Ok(BlockVerdict::Stored),
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(BlockVerdict::Stored),
         }
     }
 

@@ -217,3 +217,28 @@ fn long_forged_chains_cost_one_branch_attempt_each() {
     }
     eprintln!("LONGFLOOD honest served in window {windows} of at most {}", f + 1);
 }
+
+/// A failed sample always scores (R18-17): when another root at the tip has
+/// no body yet, the forged root that failed its ticket is still reported as
+/// `Sample` — never folded into that root's `NeedBodies` — so the sender's
+/// +100 and ban are never lost to another branch's state.
+#[test]
+fn a_failed_sample_is_reported_beside_a_body_less_root() {
+    let net = Net::new(2);
+    let mut c = net.open("score");
+    let miner = net.neurons[1];
+    mine_n(&mut c, miner, 2);
+    c.set_budget_on(true);
+    c.set_v_budget(3);
+    c.renew_verify_budget();
+    let tip = c.tip().id;
+    // a body-less root at the tip (a header only), then a forged root with a body
+    let bare = forged(&mut c, miner, [0x41; 32]);
+    assert_eq!(c.accept_header(&bare.header, NOW), Ok(crate::chain::api::HeaderVerdict::Accepted));
+    let bad = forged(&mut c, miner, [0x42; 32]);
+    assert!(matches!(c.accept_block(&bad, NOW), Err(ChainError::Block(BlockError::Sample(_)))), "the failed sample is reported, not NeedBodies");
+    assert_eq!(c.accept_header(&bad.header, NOW), Err(ChainError::Rejected(bad.id())), "remembered as rejected");
+    assert_eq!(c.tip().id, tip);
+    // the body-less root is still wanted by sync
+    assert!(matches!(c.try_advance(), Ok(BlockVerdict::NeedBodies(ids)) if ids == vec![bare.id()]));
+}
