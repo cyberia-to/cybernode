@@ -419,3 +419,61 @@ fn settlement_cost_on_genesis_files() {
         }
     }
 }
+
+/// The payout by the sampled mean (rewards.md §7 step 4, `k_c ≥ K_MIN`),
+/// against a known expected value (R18-16). Two players on the sink edge
+/// b → cc; `W_TICKET = 2`, so every ticket carries one marginal; 4·K_MIN
+/// tickets with the rank alternating cover each player well over K_MIN
+/// times (the rank picks a position of the drawn ordering, so the split is
+/// a coin flip per ticket). The mean of a player's sampled marginals is its Shapley value —
+/// for two players exactly the average of the two orderings' marginals,
+/// which `Game::shapley` enumerates — so `a(c)` is the mean (not the exact
+/// gradient), the shares are rescaled to `v(N)`, floored, and the dust is
+/// the pool's.
+#[test]
+fn settlement_pays_by_the_sampled_mean_at_k_min() {
+    use super::focus::Tru;
+    use super::lottery::Lottery;
+    use super::settle::{Position, Snapshot, compute};
+    use super::weights::GenesisWeights;
+    use crate::chain::params::K_MIN;
+    use crate::chain::ticket::EpochGame;
+    use std::sync::Arc;
+    let (a, b, cc) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+    let weights = GenesisWeights { axons: vec![(a, b, 1_000), (b, cc, 1_000)], total: 2_000, at_floor: 0 };
+    let axon = axon_of(&b, &cc);
+    let pos = |author: u8, stake: u64| Position { card: card_id(&[author; 32], &b, &cc), axon, p: b, q: cc, owner: [author; 32], valence: 1, stake };
+    let snap = |epoch: u64, positions: Vec<Position>| {
+        let mut positions = positions;
+        positions.sort_by(|x, y| x.card.cmp(&y.card));
+        let active = positions.iter().map(|p| p.stake).sum();
+        Snapshot { epoch, height: epoch * 10, block_id: [epoch as u8; 32], state_root: [0; 32], positions, marks: Default::default(), active, supply: 1_000_000 }
+    };
+    let (prev, cur) = (snap(1, vec![]), snap(2, vec![pos(7, 60), pos(8, 40)]));
+    let game = Arc::new(EpochGame::from_snapshots(&prev, &cur, &weights, 2, 1).unwrap());
+    assert_eq!(game.players.len(), 2);
+    let value = game.value_of_all();
+    assert!(value > 0, "two locks into the sink raise syntropy: v(N) = {value}");
+    // 2·K_MIN tickets: nonce n, rank n mod 2 — each ticket's one marginal is
+    // the rank-r player's along π(n), so each player is covered ≥ K_MIN times
+    let tickets: Vec<Arc<_>> = (0..4 * K_MIN as u64).map(|n| Arc::new(game.ticket_at(n, n % 2, 1))).collect();
+    let lottery = Lottery { game: game.clone(), tickets };
+    let r = compute(&prev, &cur, &weights, &Tru::new(1), None, &lottery);
+    let shapley = game.game().shapley();
+    assert_eq!(r.by_mean, 2, "both players reached K_MIN: {:?}", r.lottery.iter().map(|e| e.k).collect::<Vec<_>>());
+    let mut paid_sum = 0i128;
+    for (i, e) in r.lottery.iter().enumerate() {
+        assert!(e.k as usize >= K_MIN, "player {i}: k = {}", e.k);
+        assert_eq!(e.a, e.mean, "paid by the mean, not the exact gradient");
+        // a two-player ordering sample is exact: the mean over the window is
+        // the Shapley value up to the integer rounding of the mean itself
+        let diff = (e.mean - shapley[i]).abs();
+        assert!(diff <= 1 + shapley[i].abs() / 1_000, "player {i}: mean {} vs Shapley {}", e.mean, shapley[i]);
+        assert!(e.paid >= 0 && e.paid <= value);
+        paid_sum += e.paid;
+    }
+    // the rescale to v(N): Σ â ≤ v(N), every share floored, the dust the pool's
+    assert!(paid_sum <= value && value - paid_sum < 2, "Σ paid {paid_sum}, v(N) {value}, dust {}", value - paid_sum);
+    assert_eq!(r.value, value);
+    assert_eq!(r.samples, 4 * K_MIN as u32);
+}
