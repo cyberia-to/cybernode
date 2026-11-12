@@ -32,6 +32,7 @@ pub mod select;
 pub mod sigs;
 pub mod state;
 pub mod store;
+pub mod ticket;
 pub mod tree;
 pub mod tx;
 pub mod u256;

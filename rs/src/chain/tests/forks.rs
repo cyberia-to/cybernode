@@ -167,7 +167,7 @@ fn validation_order_pow_before_body_and_state_root_marks_invalid() {
     // valid PoW, wrong state root: the header is stored, then marked invalid
     let mut wrong = tpl.header;
     wrong.state_root[0] ^= 1;
-    let block = Block { header: solve(wrong), body: tpl.body.clone() };
+    let block = Block { header: solve(&tpl, wrong), body: tpl.body.clone() };
     assert!(matches!(a.accept_block(&block, NOW), Err(ChainError::Block(BlockError::StateRoot { .. }))));
     assert_eq!(a.accept_header(&block.header, NOW), Err(ChainError::Rejected(block.id())));
     // a child of the invalid block is refused at step 2
@@ -196,10 +196,10 @@ fn timestamps_mtp_rule_future_drift_and_bits() {
     let mut tpl = template(&mut a, m, mtp, &[]);
     assert_eq!(tpl.header.time, mtp + 1, "the template raises the time to MTP + 1");
     tpl.header.time = mtp;
-    let at_mtp = Block { header: solve(tpl.header), body: tpl.body.clone() };
+    let at_mtp = Block { header: solve(&tpl, tpl.header), body: tpl.body.clone() };
     assert_eq!(a.accept_block(&at_mtp, NOW), Err(ChainError::Time { mtp, actual: mtp }));
     tpl.header.time = mtp + 1;
-    let ok = Block { header: solve(tpl.header), body: tpl.body.clone() };
+    let ok = Block { header: solve(&tpl, tpl.header), body: tpl.body.clone() };
     assert_eq!(a.accept_block(&ok, NOW), Ok(BlockVerdict::Extended));
     // future drift: held (an error that is not a rejection), accepted once the clock passes
     let now = ok.header.time;
@@ -211,17 +211,17 @@ fn timestamps_mtp_rule_future_drift_and_bits() {
     // wrong bits
     let mut tpl = template(&mut a, m, 0, &[]);
     tpl.header.bits = 0x2000_8000;
-    let wrong = Block { header: solve(tpl.header), body: tpl.body.clone() };
+    let wrong = Block { header: solve(&tpl, tpl.header), body: tpl.body.clone() };
     assert!(matches!(a.accept_block(&wrong, NOW), Err(ChainError::Bits { .. })));
     // wrong height
     let mut tpl = template(&mut a, m, 0, &[]);
     tpl.header.height += 1;
-    let wrong = Block { header: solve(tpl.header), body: tpl.body.clone() };
+    let wrong = Block { header: solve(&tpl, tpl.header), body: tpl.body.clone() };
     assert!(matches!(a.accept_block(&wrong, NOW), Err(ChainError::Height { .. })));
     // unknown parent
     let mut tpl = template(&mut a, m, 0, &[]);
     tpl.header.prev = [9; 32];
-    let orphan = Block { header: solve(tpl.header), body: tpl.body.clone() };
+    let orphan = Block { header: solve(&tpl, tpl.header), body: tpl.body.clone() };
     assert_eq!(a.accept_block(&orphan, NOW), Err(ChainError::UnknownParent([9; 32])));
 }
 

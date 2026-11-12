@@ -46,6 +46,9 @@ pub(crate) async fn run(inner: Arc<Inner>, mut rx: mpsc::Receiver<Hint>) {
                 preferred = Some(p);
             }
         }
+        // blocks that waited on the verification budget or a missing game
+        // (chain.md §5.5 step 8): retried every tick, peers or none
+        inner.chain.retry_waiting();
         if inner.isolated.load(Ordering::Relaxed) {
             continue;
         }
@@ -282,7 +285,7 @@ pub(crate) async fn body_sync(inner: &Arc<Inner>) {
             match inner.chain.accept_block(&header, &body, now_unix()) {
                 // NeedBodies: stored; the next round's missing list carries the gap
                 Ok(BlockVerdict::NewTip) | Ok(BlockVerdict::Stored) | Ok(BlockVerdict::Known) | Ok(BlockVerdict::NeedBodies(_)) => applied += 1,
-                Err(e @ (BlockError::Held | BlockError::Refused(_) | BlockError::Store(_) | BlockError::UnknownParent)) => {
+                Err(e @ (BlockError::Held | BlockError::Waiting(_) | BlockError::Refused(_) | BlockError::Store(_) | BlockError::UnknownParent)) => {
                     inner.say(&format!("block {height}: {e}"));
                     return;
                 }

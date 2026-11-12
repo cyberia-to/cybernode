@@ -9,18 +9,21 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::api::{BlockVerdict, ChainError, Event};
 use super::apply::{self, Decoded, Locked, Rules};
 use super::bbg_state::BbgBacked;
 use super::daa::{median_time_past, next_bits, next_bits_reverted};
 use super::economy::focus::{FocusEngine, Tru};
+use super::economy::lottery::Lottery;
 use super::economy::run::Economy;
 use super::economy::settle::SettleResult;
 use super::economy::weights::GenesisWeights;
 use super::genesis::Genesis;
-use super::header::{BlockId, Header, HeaderError, decode_bits};
-use super::params::{CHAINS, COINBASE_MATURITY, EpochClock, FINALITY_DEPTH, MAX_FUTURE_DRIFT, MTP_WINDOW, REVERTS, RULE_SET};
+use super::header::{BlockId, Header, HeaderError, decode_bits, hash32};
+use super::params::{BLOCK_TIME, CHAINS, COINBASE_MATURITY, EpochClock, FINALITY_DEPTH, MAX_FUTURE_DRIFT, MTP_WINDOW, REVERTS, RULE_SET, v_budget, w_ticket};
+use super::ticket::EpochGame;
 use super::pow::{chainwork, valid_pow};
 use super::revert::{self, RevertEntry, RevertTable, Reverted};
 use super::revert_statement::{self, RevertStatement, StatementError, StatementSet};
@@ -76,10 +79,28 @@ pub struct Chain {
     /// transactions of the main-chain blocks a revert retracted at open, in
     /// original block order, coinbases skipped; taken by the mempool
     pub(super) retracted_txs: Vec<Vec<u8>>,
+    /// the instants of the full sample verifications of the last block
+    /// interval: `V_BUDGET` of them per interval (chain.md §5.5 step 8)
+    pub(super) verifications: VecDeque<Instant>,
+    /// the node's own draw for ties among unverified candidates of equal
+    /// chainwork (rewards.md §7 "Verification"): local, never consensus
+    pub(super) tie_salt: [u8; 32],
+    /// a block waits here when the budget is spent; retried by `try_advance`
+    pub(super) budget_spent: bool,
 }
 
 /// The launch chains: they run the spec's epoch clock and nothing else.
 pub const LAUNCH_CHAINS: &[&str] = &["pussy", "bostrom"];
+
+/// The node's own randomness for its tie draw: the clock and the process,
+/// hashed. Local policy, never consensus.
+fn local_salt() -> [u8; 32] {
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let mut m = Vec::with_capacity(24);
+    m.extend_from_slice(&t.as_nanos().to_le_bytes());
+    m.extend_from_slice(&std::process::id().to_le_bytes());
+    hash32(&m)
+}
 
 /// The statement set with `st` taken in (`None`: it changes nothing), or why
 /// not: the signature and bounds ([`RevertStatement::check`]), the supersede
@@ -140,6 +161,7 @@ impl Chain {
             )));
         }
         reverts.check_static().map_err(|e| ChainError::Store(format!("revert table: {e}")))?;
+        let name = genesis.params().name.clone();
         let rules = Rules {
             chain: genesis.chain_id,
             native: genesis.native_token(),
@@ -147,6 +169,8 @@ impl Chain {
             subsidy: genesis.subsidy(),
             s0: genesis.s0(),
             clock,
+            w_ticket: w_ticket(&name),
+            v_budget: v_budget(&name),
         };
         std::fs::create_dir_all(home).map_err(|e| ChainError::Store(e.to_string()))?;
         let mut store = Store::open(&home.join("blocks")).map_err(ChainError::Store)?;
@@ -181,10 +205,11 @@ impl Chain {
             }
         }
         let engine: Arc<dyn FocusEngine> = opts.engine.unwrap_or_else(|| Arc::new(Tru::for_node()));
-        let mut economy = Economy::new(GenesisWeights::from_file(&genesis.file), engine, clock, Some(home.join("epochs")));
+        let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let mut economy = Economy::new(GenesisWeights::from_file(&genesis.file), engine, clock, Some(home.to_path_buf()), rules.w_ticket, workers);
         economy.background = !opts.inline_settlement;
         economy.quadrature = if opts.quadrature == 0 { super::params::ATTR_NODES } else { opts.quadrature };
-        economy.on_boundary(&state, 0, block0.id(), root0, rules.s0, None);
+        economy.on_boundary(&state, 0, block0.id(), root0, rules.s0);
         let mut chain = Chain {
             genesis,
             rules,
@@ -206,6 +231,9 @@ impl Chain {
             home: home.to_path_buf(),
             reverted: revert::load_last(&home.join(REVERTED_LOG)),
             retracted_txs: Vec::new(),
+            verifications: VecDeque::new(),
+            tie_salt: local_salt(),
+            budget_spent: false,
         };
         chain.reverts.check_store(&chain.store).map_err(|e| ChainError::Store(format!("revert table: {e}")))?;
         chain.apply_reverts(home)?;
@@ -327,10 +355,11 @@ impl Chain {
             let mut state = self.genesis.state();
             let root0 = state.root();
             let block0 = self.genesis.block0(root0);
-            let mut economy = Economy::new(GenesisWeights::from_file(&self.genesis.file), self.economy.engine.clone(), self.rules.clock, Some(home.join("epochs")));
+            let workers = self.economy.tickets.workers;
+            let mut economy = Economy::new(GenesisWeights::from_file(&self.genesis.file), self.economy.engine.clone(), self.rules.clock, Some(home.clone()), self.rules.w_ticket, workers);
             economy.background = self.economy.background;
             economy.quadrature = self.economy.quadrature;
-            economy.on_boundary(&state, 0, block0.id(), root0, self.rules.s0, None);
+            economy.on_boundary(&state, 0, block0.id(), root0, self.rules.s0);
             self.state = state;
             self.economy = economy;
             self.coinbases.clear();
@@ -358,29 +387,98 @@ impl Chain {
             let body = self.store.body(&id).ok_or_else(|| ChainError::Store(format!("missing body at {h}")))?;
             let txs = apply::decode_body(&self.rules, &header, &body).map_err(ChainError::Block)?;
             let locked = Locked::at(self.coinbases.make_contiguous(), h);
-            self.apply_on_tip(&header, &txs, &locked).map_err(ChainError::Block)?;
+            self.apply_on_tip(&header, &txs, &locked)?;
             self.push_coinbase(h, &txs);
         }
         self.economy.prune(tip);
         Ok(())
     }
 
+    /// The three boundary ids the settlement of epoch `e` reads on the
+    /// main chain: `boundary(e − 1)`, `boundary(e)`, `boundary(e + 1)`.
+    fn settlement_key(&self, e: u64) -> Option<(BlockId, BlockId, BlockId)> {
+        let c = self.rules.clock;
+        Some((self.store.main_at(c.boundary(e - 1))?, self.store.main_at(c.boundary(e))?, self.store.main_at(c.boundary(e + 1))?))
+    }
+
+    /// The lottery of epoch `e` on the main chain: its game and the tickets
+    /// of the window `(boundary(e), boundary(e + 1)]`, each verified or
+    /// recomputed (a replay without the ticket cache solves them again).
+    fn lottery_of(&mut self, e: u64, prev: &BlockId, cur: &BlockId) -> Option<Lottery> {
+        let game = self.economy.game(prev, cur)?.ok()?;
+        let c = self.rules.clock;
+        let mut tickets = Vec::with_capacity(c.length as usize);
+        for h in c.boundary(e) + 1..=c.boundary(e + 1) {
+            let id = self.store.main_at(h)?;
+            let header = self.entry(&id)?.header;
+            tickets.push(self.economy.tickets.verify(&header, &game).ok()?);
+        }
+        Some(Lottery { game, tickets })
+    }
+
     /// The settlement the block at `height` (on the main tip) must carry,
     /// if one is due: the result reading the main chain's boundaries of
-    /// epochs E − 1 and E (chain-economy §2.5).
+    /// epochs E − 1, E and E + 1 (chain-economy §2.5 amended).
     pub(super) fn settlement_for(&mut self, height: u64) -> Option<Arc<SettleResult>> {
         let e = self.rules.clock.settles_at(height)?;
-        let prev = self.store.main_at(self.rules.clock.boundary(e - 1))?;
-        let cur = self.store.main_at(self.rules.clock.boundary(e))?;
-        self.economy.result(&prev, &cur)
+        let (prev, cur, end) = self.settlement_key(e)?;
+        if let Some(r) = self.economy.lottery_of(&prev, &cur, &end) {
+            return Some(r);
+        }
+        let lottery = self.lottery_of(e, &prev, &cur);
+        self.economy.result(&prev, &cur, &end, move || lottery)
+    }
+
+    /// The game the block at `height` samples (rewards.md §7): the game of
+    /// `epoch(height) − 1`, from the boundaries on the parent's branch.
+    /// `Err` names what is missing — a snapshot this node never took is its
+    /// own condition, never the block's fault.
+    pub(super) fn game_for(&mut self, parent: &BlockId, height: u64) -> Result<Arc<EpochGame>, ChainError> {
+        let c = self.rules.clock;
+        let e = c.game_of(height);
+        let (prev, cur) = if e == 0 {
+            let g = self.store.main_at(0).ok_or(ChainError::Store("no genesis".into()))?;
+            (g, g)
+        } else {
+            let at = |h: u64| self.store.ancestor_at(parent, h).ok_or_else(|| ChainError::Game(format!("no ancestor at {h}")));
+            (at(c.boundary(e - 1))?, at(c.boundary(e))?)
+        };
+        match self.economy.game(&prev, &cur) {
+            Some(Ok(g)) => Ok(g),
+            Some(Err(e)) => Err(ChainError::Game(e)),
+            None => Err(ChainError::Game(format!("the boundary snapshots of epoch {e} are not held on this node"))),
+        }
+    }
+
+    /// Chain.md §5.5 step 8, the sample: the header's ticket recomputed on
+    /// its game and compared with its commitment, under the node-wide
+    /// budget of `V_BUDGET` full verifications per block interval. A cached
+    /// ticket costs nothing and is outside the budget.
+    fn verify_sample(&mut self, header: &Header) -> Result<(), ChainError> {
+        let game = self.game_for(&header.prev, header.height)?;
+        if !self.economy.tickets.is_cached(header) {
+            let now = Instant::now();
+            let interval = Duration::from_secs(BLOCK_TIME as u64);
+            while self.verifications.front().is_some_and(|t| now.duration_since(*t) >= interval) {
+                self.verifications.pop_front();
+            }
+            if self.verifications.len() >= self.rules.v_budget {
+                self.budget_spent = true;
+                return Err(ChainError::VerifyBudget);
+            }
+            self.verifications.push_back(now);
+        }
+        self.economy.tickets.verify(header, &game).map(|_| ()).map_err(|e| ChainError::Block(apply::BlockError::Sample(e.to_string())))
     }
 
     /// Steps 7–8 for a block whose parent is the main tip, with the
-    /// economy's side effects: the settlement result in, the outcome kept,
-    /// the boundary snapshot taken and its settlement started.
-    fn apply_on_tip(&mut self, header: &Header, txs: &[Decoded], locked: &Locked) -> Result<super::state::Undo, apply::BlockError> {
+    /// economy's side effects: the sample verified, the settlement result
+    /// in, the outcome kept, the boundary snapshot taken and the closed
+    /// epoch's settlement started.
+    fn apply_on_tip(&mut self, header: &Header, txs: &[Decoded], locked: &Locked) -> Result<super::state::Undo, ChainError> {
+        self.verify_sample(header)?;
         let settle = self.settlement_for(header.height);
-        let applied = apply::apply_block(&self.rules, header, txs, &mut self.state, locked, settle.as_deref())?;
+        let applied = apply::apply_block(&self.rules, header, txs, &mut self.state, locked, settle.as_deref()).map_err(ChainError::Block)?;
         let id = header.id();
         if let Some(outcome) = applied.settled {
             self.economy.record_outcome(id, outcome);
@@ -388,9 +486,16 @@ impl Chain {
         let clock = self.rules.clock;
         if clock.is_boundary(header.height) {
             let epoch = clock.epoch(header.height);
-            let prev = self.store.main_at(clock.boundary(epoch - 1));
             let supply = self.rules.supply_at(header.height);
-            self.economy.on_boundary(&self.state, epoch, id, header.state_root, supply, prev);
+            self.economy.on_boundary(&self.state, epoch, id, header.state_root, supply);
+            // the window of epoch E − 1 closed with this block: its settlement starts now
+            if epoch >= 2 {
+                if let Some((prev, cur, end)) = self.settlement_key(epoch - 1) {
+                    if let Some(lottery) = self.lottery_of(epoch - 1, &prev, &cur) {
+                        self.economy.start(prev, cur, end, lottery);
+                    }
+                }
+            }
         }
         Ok(applied.undo)
     }
@@ -461,18 +566,31 @@ impl Chain {
         ChainError::Checkpoint { height, expected }
     }
 
-    /// Non-invalid headers heavier than the tip, heaviest first, ties in
-    /// first-seen order (§5.1).
+    /// Non-invalid headers heavier than the tip, heaviest first; ties among
+    /// verified blocks in first-seen order (§5.1), ties among blocks whose
+    /// sample is still to be checked in an order drawn from the node's own
+    /// salt — unpredictable to a sender flooding target-passing headers
+    /// (rewards.md §7 "Verification").
     fn candidates(&self) -> Vec<BlockId> {
         let tip_work = self.entry(&self.tip_id()).map(|e| e.chainwork).unwrap_or(U256::ZERO);
-        let mut v: Vec<(U256, u64, BlockId)> = self
+        let mut v: Vec<(U256, u8, [u8; 32], BlockId)> = self
             .store
             .iter()
             .filter(|(_, e)| e.status != store::Status::Invalid && e.chainwork > tip_work)
-            .map(|(id, e)| (e.chainwork, e.seq, *id))
+            .map(|(id, e)| {
+                let verified = e.status == store::Status::Valid;
+                let key = if verified {
+                    let mut k = [0u8; 32];
+                    k[..8].copy_from_slice(&e.seq.to_be_bytes());
+                    k
+                } else {
+                    hash32(&[&self.tie_salt[..], &id[..]].concat())
+                };
+                (e.chainwork, u8::from(!verified), key, *id)
+            })
             .collect();
-        v.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        v.into_iter().map(|(_, _, id)| id).collect()
+        v.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        v.into_iter().map(|(_, _, _, id)| id).collect()
     }
 
     /// Median time past of the parent and its ancestors (§1.4).
@@ -590,12 +708,13 @@ impl Chain {
         let locked = self.locked_at(header.height);
         let undo = match self.apply_on_tip(header, txs, &locked) {
             Ok(undo) => undo,
-            // a settlement this node cannot compute is its own condition,
-            // never the block's fault (chain-economy §2.5: it waits)
-            Err(e @ apply::BlockError::Settlement { .. }) => return Err(ChainError::Block(e)),
+            // a settlement or a game this node cannot compute, or a spent
+            // verification budget, is its own condition, never the block's
+            // fault (chain-economy §2.5: it waits)
+            Err(e) if !e.is_blocks_fault() => return Err(e),
             Err(e) => {
                 self.invalidate(id);
-                return Err(ChainError::Block(e));
+                return Err(e);
             }
         };
         self.store.put_undo(&id, &undo).map_err(ChainError::Store)?;
@@ -664,6 +783,7 @@ impl Chain {
     /// missing. A heavier chain the reorg limit or a checkpoint forbids is
     /// reported and skipped in favour of the next candidate.
     pub fn try_advance(&mut self) -> Result<BlockVerdict, ChainError> {
+        self.budget_spent = false;
         let tip = self.tip_id();
         let tip_work = self.entry(&tip).map(|e| e.chainwork).unwrap_or(U256::ZERO);
         if !select::heavier(self.heaviest, tip_work) {
@@ -788,9 +908,12 @@ impl Chain {
             applied += 1;
         }
         if let Some(e) = failure {
-            // every descendant of the failed block is invalid too
-            for id in &path[applied + 1..] {
-                self.invalidate(*id);
+            // every descendant of the failed block is invalid too — unless
+            // the failure was this node's own condition
+            if e.is_blocks_fault() {
+                for id in &path[applied + 1..] {
+                    self.invalidate(*id);
+                }
             }
             for _ in 0..applied {
                 self.retract()?;

@@ -393,7 +393,7 @@ mod tests {
     fn header() -> Header {
         Header {
             version: 1, height: 1, time: 1762349000, bits: 0x1d100000, nonce: [0; 16],
-            prev: [0x11; 32], tx_root: [0x22; 32], state_root: [0x33; 32], chain: [0x44; 32],
+            prev: [0x11; 32], tx_root: [0x22; 32], state_root: [0x33; 32], chain: [0x44; 32], sample: [0x55; 32],
         }
     }
 

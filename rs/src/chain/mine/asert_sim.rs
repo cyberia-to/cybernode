@@ -4,10 +4,19 @@
 
 #![cfg(test)]
 
-use super::target::{pow2, Words};
 use crate::chain::daa::{asert, Anchor};
 use crate::chain::header::encode_bits;
 use crate::chain::u256::U256;
+
+/// A target as four little-endian limbs.
+type Words = [u64; 4];
+
+/// `2^n` as limbs.
+const fn pow2(n: u32) -> Words {
+    let mut w = [0u64; 4];
+    w[(n / 64) as usize] = 1 << (n % 64);
+    w
+}
 
 fn anchor(g: &Words) -> Anchor {
     Anchor {

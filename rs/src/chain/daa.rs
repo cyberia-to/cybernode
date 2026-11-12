@@ -151,14 +151,15 @@ mod tests {
             (19, 1_170, 65_536, 1, 0, 65_536, 0x1d20_0000),
             (100, 2_400, -65_536, -1, 0, 65_536, 0x1d08_0000),
             (19, 0, -62_260, -1, 3_276, 67_852, 0x1d08_4860),
-            (5, 1_000_000, 109_210_282, 1_666, 27_306, 87_473, 0x1e10_0000),
+            // row 6 pins the clamp at POW_LIMIT = 2^252 (chain-conformance §4 amended 2026-11-04)
+            (5, 1_000_000, 109_210_282, 1_666, 27_306, 87_473, 0x2010_0000),
         ];
         for (height, time, e, shifts, frac, factor, bits) in rows {
             let a = asert(anchor(), height, time);
             assert_eq!((a.e, a.shifts, a.frac, a.factor, a.bits), (e, shifts, frac, factor, bits), "parent {height}@{time}");
         }
         assert_eq!(asert(anchor(), 19, 0).target, U256::from_u64(0x08_4860) << (8 * 26));
-        assert_eq!(asert(anchor(), 5, 1_000_000).target, U256::ONE << 236);
+        assert_eq!(asert(anchor(), 5, 1_000_000).target, U256::ONE << 252);
     }
 
     #[test]
@@ -210,7 +211,7 @@ mod tests {
     #[test]
     fn huge_positive_shift_saturates_at_limit() {
         let a = anchor();
-        assert_eq!(asert(a, 0, u64::MAX / 4).bits, 0x1e10_0000);
-        assert_eq!(asert(Anchor { target: U256::ONE, time: 0 }, 0, 600 * 300).target, U256::ONE << 236);
+        assert_eq!(asert(a, 0, u64::MAX / 4).bits, 0x2010_0000);
+        assert_eq!(asert(Anchor { target: U256::ONE, time: 0 }, 0, 600 * 300).target, U256::ONE << 252);
     }
 }

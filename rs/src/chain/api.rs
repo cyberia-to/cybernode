@@ -9,6 +9,7 @@
 use super::apply::{BlockError, TxError};
 use super::genesis::Genesis;
 use super::header::{BlockId, Header, HeaderError};
+use super::params::HEADER_BYTES;
 use super::revert::{RevertEntry, Reverted};
 use super::revert_statement::{RevertStatement, StatementError};
 use super::select::{Checkpoint, CheckpointError};
@@ -37,7 +38,7 @@ impl Block {
         self.header.id()
     }
 
-    /// `header[168] ‖ body` — the `B` frame payload of chain-wire §3.
+    /// `header[200] ‖ body` — the `B` frame payload of chain-wire §3.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = self.header.encode().to_vec();
         out.extend_from_slice(&self.body);
@@ -45,8 +46,8 @@ impl Block {
     }
 
     pub fn decode(b: &[u8]) -> Result<Block, HeaderError> {
-        let header = Header::decode_raw(b.get(..168).ok_or(HeaderError::Length(b.len()))?)?;
-        Ok(Block { header, body: b[168..].to_vec() })
+        let header = Header::decode_raw(b.get(..HEADER_BYTES).ok_or(HeaderError::Length(b.len()))?)?;
+        Ok(Block { header, body: b[HEADER_BYTES..].to_vec() })
     }
 }
 
@@ -108,6 +109,22 @@ pub enum ChainError {
     Genesis,
     /// the store
     Store(String),
+    /// step 8: the node's `V_BUDGET` of sample verifications for this block
+    /// interval is spent; the block waits in the store and is retried
+    /// (chain.md §5.5 amended) — never the block's fault
+    VerifyBudget,
+    /// step 8: the game the block samples cannot be built on this node
+    /// yet (a boundary snapshot it does not hold) — never the block's fault
+    Game(String),
+}
+
+impl ChainError {
+    /// Is the block (and every descendant) invalid for it, or is it this
+    /// node's own condition — a settlement or a game not computed, a spent
+    /// verification budget — after which the same block may be accepted?
+    pub fn is_blocks_fault(&self) -> bool {
+        !matches!(self, ChainError::VerifyBudget | ChainError::Game(_) | ChainError::Block(BlockError::Settlement { .. }))
+    }
 }
 
 impl std::fmt::Display for ChainError {
@@ -129,6 +146,8 @@ impl std::fmt::Display for ChainError {
             ChainError::Rejected(_) => write!(f, "previously rejected block"),
             ChainError::Genesis => write!(f, "genesis block mismatch"),
             ChainError::Store(e) => write!(f, "store: {e}"),
+            ChainError::VerifyBudget => write!(f, "the sample verification budget of this interval is spent; retry"),
+            ChainError::Game(s) => write!(f, "the epoch's game is not available: {s}"),
         }
     }
 }
@@ -156,6 +175,8 @@ pub struct Template {
     pub body: Vec<u8>,
     pub txids: Vec<Id>,
     pub fees: u64,
+    /// the game the block samples (rewards.md §7): the miner's input
+    pub game: std::sync::Arc<super::ticket::EpochGame>,
 }
 
 fn hex(b: &[u8]) -> String {
@@ -165,8 +186,9 @@ fn hex(b: &[u8]) -> String {
 impl Template {
     /// The `GET /template` answer of chain-wire §7, exactly.
     pub fn json(&self, chain_name: &str, expires: u64) -> String {
+        let g = &self.game;
         format!(
-            "{{\"chain\":{},\"height\":{},\"prev\":\"{}\",\"header\":\"{}\",\"bits\":\"{:08x}\",\"target\":\"{}\",\"body\":\"{}\",\"expires\":{}}}",
+            "{{\"chain\":{},\"height\":{},\"prev\":\"{}\",\"header\":\"{}\",\"bits\":\"{:08x}\",\"target\":\"{}\",\"body\":\"{}\",\"expires\":{},\"game\":{{\"epoch\":{},\"beacon\":\"{}\",\"cluster\":\"{}\",\"players\":{},\"axons\":{},\"w_ticket\":{}}}}}",
             serde_json::to_string(chain_name).unwrap_or_else(|_| "\"\"".into()),
             self.header.height,
             hex(&self.header.prev),
@@ -174,7 +196,13 @@ impl Template {
             self.header.bits,
             hex(&self.target.to_le_bytes()),
             hex(&self.body),
-            expires
+            expires,
+            g.epoch,
+            hex(&g.beacon),
+            hex(&g.cluster),
+            g.players.len(),
+            g.base.len(),
+            g.width
         )
     }
 }

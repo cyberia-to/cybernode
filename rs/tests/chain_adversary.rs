@@ -148,18 +148,23 @@ fn pow_ok(h: &Header) -> bool {
     cybernode::chain::pow::valid_pow(&cybernode::chain::header::Header::decode_raw(&h.encode()).unwrap())
 }
 
-/// Solve a header with the reference miner's CPU backend.
-fn solve(h: Header) -> Header {
-    use cybernode::chain::mine::{cpu::Cpu, target::target_of, Backend, Job};
-    let job = Job::new(&h.encode(), target_of(h.bits).unwrap());
-    let cpu = Cpu::new(0);
-    let mut base = 0u128;
-    loop {
-        if let Some(i) = cpu.search(&job, base, 1 << 16).unwrap() {
-            return Header::decode(&job.header_with(base + i as u128)).unwrap();
+/// Solve a header as the reference miner does: the ticket of each nonce's
+/// template on the game the node serves for the next block, until the id
+/// passes (rewards.md §7).
+fn solve(node: &NodeProc, h: Header) -> Header {
+    use cybernode::chain::mine::api::{Client, Template};
+    let client = Client::new(&format!("http://127.0.0.1:{}", node.http), &"ab".repeat(32));
+    let t: Template = client.template().expect("a template names the game");
+    let game = client.game(&t.game.beacon).expect("the game").build(2).expect("builds");
+    let mut kh = cybernode::chain::header::Header::decode_raw(&h.encode()).unwrap();
+    for n in 0u128.. {
+        kh.nonce = n.to_le_bytes();
+        game.solve(&mut kh, 2);
+        if cybernode::chain::pow::valid_pow(&kh) {
+            return Header::decode(&kh.encode()).unwrap();
         }
-        base += 1 << 16;
     }
+    unreachable!()
 }
 
 fn node_addr(node: &NodeProc) -> EndpointAddr {
@@ -209,7 +214,7 @@ impl ProtocolHandler for BadServer {
                     }
                     Frame::GetBlocks(ids) => {
                         requests.fetch_add(ids.len(), Ordering::Relaxed);
-                        let header = announced.lock().unwrap().unwrap_or(Header { version: 1, height: 1, time: 1, bits: POW_LIMIT_BITS, nonce: [0; 16], prev: [0; 32], tx_root: [0; 32], state_root: [0; 32], chain: [0; 32] });
+                        let header = announced.lock().unwrap().unwrap_or(Header { version: 1, height: 1, time: 1, bits: POW_LIMIT_BITS, nonce: [0; 16], prev: [0; 32], tx_root: [0; 32], state_root: [0; 32], chain: [0; 32], sample: [0; 32] });
                         for _ in ids {
                             let _ = write_frame(&mut send, &Frame::Block { header, body: vec![9, 9, 9, 9, 9] }).await;
                         }
@@ -327,7 +332,7 @@ fn gossip_is_policed_and_bad_blocks_are_scored() {
         let height = tip["height"].as_u64().unwrap();
         let bogus = Header {
             version: 1, height: height + 1, time: cybernode::chain::net::now_unix(), bits: next_bits(&node), nonce: [0xff; 16],
-            prev: tip_id, tx_root: [3; 32], state_root: [4; 32], chain,
+            prev: tip_id, tx_root: [3; 32], state_root: [4; 32], chain, sample: [0; 32],
         };
         let bogus = (0u8..=255).map(|n| Header { nonce: [n; 16], ..bogus }).find(|h| !pow_ok(h)).expect("a 2^-20 target fails almost every nonce");
         headers.broadcast_neighbors(bytes::Bytes::from(Frame::HeaderGossip(bogus).encode())).await.unwrap();
@@ -354,9 +359,9 @@ fn gossip_is_policed_and_bad_blocks_are_scored() {
         let height = tip["height"].as_u64().unwrap();
         let candidate = Header {
             version: 1, height: height + 1, time: cybernode::chain::net::now_unix() + 5, bits: next_bits(&node), nonce: [0; 16],
-            prev: tip_id, tx_root: [3; 32], state_root: [4; 32], chain,
+            prev: tip_id, tx_root: [3; 32], state_root: [4; 32], chain, sample: [0; 32],
         };
-        let solved = solve(candidate);
+        let solved = solve(&node, candidate);
         *bad.announced.lock().unwrap() = Some(solved);
         headers.broadcast_neighbors(bytes::Bytes::from(Frame::HeaderGossip(solved).encode())).await.unwrap();
         assert!(wait_until(15, || bad.requests.load(Ordering::Relaxed) > 0), "the node never asked for the body");

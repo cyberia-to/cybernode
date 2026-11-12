@@ -262,7 +262,7 @@ fn a_rehearsal_refuses_to_start_on_a_production_chain() {
 }
 
 fn header_at(height: u64, time: u64) -> Header {
-    Header { version: 1, height, time, bits: 0x1d10_0000, nonce: [0; 16], prev: [0; 32], tx_root: [0; 32], state_root: [0; 32], chain: [0; 32] }
+    Header { version: 1, height, time, bits: 0x1d10_0000, nonce: [0; 16], prev: [0; 32], tx_root: [0; 32], state_root: [0; 32], chain: [0; 32], sample: [0; 32] }
 }
 
 #[test]
@@ -278,8 +278,10 @@ fn asert_reanchors_above_an_entry_in_the_function() {
     // the block at H + 2, parent at H + 1 stamped at the anchor: Δt = 0, ideal = 0
     let parent_11 = header_at(11, 10_000);
     assert_eq!(daa::next_bits_reverted(anchor, &reanchors, &parent_11, &ancestor), first);
-    // the genesis anchor would see days of drift and climb to POW_LIMIT
-    assert_eq!(daa::next_bits(anchor, &parent_11), 0x1e10_0000);
+    // the genesis anchor would see hours of drift and climb 2^16 and more
+    // (toward POW_LIMIT = 2^252, which this drift does not reach)
+    let drifted = decode_bits(daa::next_bits(anchor, &parent_11)).unwrap();
+    assert!(drifted >= U256::ONE << 244 && drifted < U256::ONE << 252, "{drifted:?}");
     // one interval later and on schedule (ideal = 30 s): still the anchor target
     let on_time = header_at(12, 10_030);
     assert_eq!(daa::next_bits_reverted(anchor, &reanchors, &on_time, &ancestor), first);
@@ -397,7 +399,7 @@ fn a_statement_of_the_checkpoint_key_rewinds_the_chain_and_no_other_does() {
     feed(&mut c, &blocks[..H as usize]);
     let early = mine_fast(&mut c, m1, &[]);
     assert!(early.header.time < anchor);
-    let early_v2 = solve(Header { version: 2, ..early.header });
+    let early_v2 = solve_on(&game_of(&mut c, early.header.height), Header { version: 2, ..early.header });
     assert!(matches!(a.accept_header(&early_v2, NOW), Err(ChainError::Time { .. })));
     // (d) the same statement again changes nothing
     assert_eq!(a.accept_revert_statement(&st), Ok(false));

@@ -1,6 +1,7 @@
-//! The 168-byte header (§1.1), its id, and the canonical compact target (§1.3).
+//! The 200-byte header (§1.1): the 168-byte template, the sample commitment
+//! of rewards.md §7 step 3, the id, and the canonical compact target (§1.3).
 
-use super::params::{HEADER_BYTES, RULE_SET, pow_limit};
+use super::params::{HEADER_BYTES, RULE_SET, SAMPLE_OFFSET, TEMPLATE_BYTES, pow_limit};
 use super::u256::U256;
 
 pub type BlockId = [u8; 32];
@@ -17,6 +18,10 @@ pub struct Header {
     pub tx_root: [u8; 32],
     pub state_root: [u8; 32],
     pub chain: [u8; 32],
+    /// `hemera(D_SAMPLE ‖ W ‖ m…)`, the commitment of the block's settlement
+    /// sample (chain-economy §7.1, tru `Ticket::preimage`); zero in a
+    /// template and in block 0.
+    pub sample: [u8; 32],
 }
 
 /// Why a header fails syntax (§5.5 step 1). `WrongChain` is distinct from
@@ -52,6 +57,15 @@ impl Header {
         out[72..104].copy_from_slice(&self.tx_root);
         out[104..136].copy_from_slice(&self.state_root);
         out[136..168].copy_from_slice(&self.chain);
+        out[SAMPLE_OFFSET..HEADER_BYTES].copy_from_slice(&self.sample);
+        out
+    }
+
+    /// The template: the first 168 bytes, every field but `sample` — the
+    /// seed of the block's sample (rewards.md §7 step 1).
+    pub fn template(&self) -> [u8; TEMPLATE_BYTES] {
+        let mut out = [0u8; TEMPLATE_BYTES];
+        out.copy_from_slice(&self.encode()[..TEMPLATE_BYTES]);
         out
     }
 
@@ -73,6 +87,7 @@ impl Header {
             tx_root: arr32(72),
             state_root: arr32(104),
             chain: arr32(136),
+            sample: arr32(SAMPLE_OFFSET),
         })
     }
 
@@ -200,12 +215,17 @@ pub fn clamp_bits(target: U256) -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn hex(b: &[u8]) -> String {
         b.iter().map(|x| format!("{x:02x}")).collect()
     }
+
+    /// chain-conformance §5: the id of the test header with `sample = 0x55 × 32`.
+    pub const TEST_HEADER_ID: &str = "c5db04fea97b4042d6296a43284b5ed33a18a7538afee182c275ec5712e2d60c";
+    /// chain-conformance §5: hemera over 200 zero bytes.
+    pub const ZERO_HEADER_ID: &str = "36b3f2d067dc97c244ef8168a5b0ffe467eb1c605b7b93d2f5d012be0f4103f0";
 
     pub fn test_header() -> Header {
         Header {
@@ -218,6 +238,7 @@ mod tests {
             tx_root: [0x22; 32],
             state_root: [0x33; 32],
             chain: [0x44; 32],
+            sample: [0x55; 32],
         }
     }
 
@@ -225,16 +246,23 @@ mod tests {
     fn conformance_section_5_header_bytes_and_id() {
         let h = test_header();
         let bytes = h.encode();
+        assert_eq!(bytes.len(), 200);
         assert_eq!(&hex(&bytes[..24]), "010000000100000000000000c84f0b69000000000000101d");
         assert_eq!(&bytes[24..40], &[0u8; 16]);
         assert_eq!(&bytes[40..72], &[0x11u8; 32]);
-        assert_eq!(&bytes[136..], &[0x44u8; 32]);
-        assert_eq!(hex(&h.id()), "bdd7f2ef3a5a1c573b8d84a7a2aeedc95c6f8aa2139eea5c83946b33c4180c31");
+        assert_eq!(&bytes[136..168], &[0x44u8; 32]);
+        assert_eq!(&bytes[168..], &[0x55u8; 32]);
+        assert_eq!(&h.template()[..], &bytes[..168]);
+        // the 168-byte vector of the old header stays a hemera anchor (chain-conformance §5)
+        assert_eq!(hex(&hash32(&bytes[..168])), "bdd7f2ef3a5a1c573b8d84a7a2aeedc95c6f8aa2139eea5c83946b33c4180c31");
+        assert_eq!(hex(&h.id()), TEST_HEADER_ID);
+        assert_eq!(hex(&hash32(&[0u8; 200])), ZERO_HEADER_ID);
         assert_eq!(Header::decode(&bytes, &[0x44; 32]).unwrap(), h);
-        assert_eq!(Header::decode(&bytes[..167], &[0x44; 32]), Err(HeaderError::Length(167)));
+        assert_eq!(Header::decode(&bytes[..199], &[0x44; 32]), Err(HeaderError::Length(199)));
+        assert_eq!(Header::decode(&bytes[..168], &[0x44; 32]), Err(HeaderError::Length(168)));
         let mut long = bytes.to_vec();
         long.push(0);
-        assert_eq!(Header::decode(&long, &[0x44; 32]), Err(HeaderError::Length(169)));
+        assert_eq!(Header::decode(&long, &[0x44; 32]), Err(HeaderError::Length(201)));
         assert_eq!(Header::decode(&bytes, &[0x45; 32]), Err(HeaderError::WrongChain));
         let mut v2 = h;
         v2.version = 2;
@@ -248,7 +276,11 @@ mod tests {
     #[test]
     fn conformance_section_2_compact_target() {
         let canonical = [
-            (0x1e01_0000u32, U256::ONE << 232),
+            // chain-conformance §2 amended 2026-11-04: pussy's GENESIS_BITS, POW_LIMIT (bostrom's GENESIS_BITS)
+            (0x2002_0000u32, U256::ONE << 249),
+            (0x2010_0000, U256::ONE << 252),
+            (0x1f01_0000, U256::ONE << 240),
+            (0x1e01_0000, U256::ONE << 232),
             (0x1e10_0000, U256::ONE << 236),
             (0x1d10_0000, U256::ONE << 228),
             (0x1d20_0000, U256::ONE << 229),
@@ -265,8 +297,9 @@ mod tests {
         assert_eq!(decode_bits(0x0100_3456), Err(BitsError::Zero));
         assert_eq!(decode_bits(0x1d80_0000), Err(BitsError::Sign));
         assert_eq!(decode_bits(0x0000_0000), Err(BitsError::Zero));
-        assert_eq!(decode_bits(0x1f01_0000), Err(BitsError::AboveLimit));
+        assert_eq!(decode_bits(0x2020_0000), Err(BitsError::AboveLimit), "2^253 is above POW_LIMIT");
         assert_eq!(clamp_bits(U256::ZERO), 0x0101_0000);
-        assert_eq!(clamp_bits(U256::ONE << 240), super::super::params::POW_LIMIT_BITS);
+        assert_eq!(clamp_bits(U256::ONE << 240), 0x1f01_0000);
+        assert_eq!(clamp_bits(U256::ONE << 253), super::super::params::POW_LIMIT_BITS);
     }
 }

@@ -5,8 +5,15 @@
 use super::header::BlockId;
 use super::u256::U256;
 
-/// Header size in bytes (§1.1).
-pub const HEADER_BYTES: usize = 168;
+/// Header size in bytes (§1.1): the 168-byte template and the 32-byte
+/// sample commitment at [`SAMPLE_OFFSET`]; 200 = 3 × 56 + 32, four hemera
+/// permutations (rewards.md §7 step 3).
+pub const HEADER_BYTES: usize = 200;
+/// The template: the header's first 168 bytes, the seed of its sample
+/// (rewards.md §7 step 1).
+pub const TEMPLATE_BYTES: usize = 168;
+/// Offset of `sample` in the header (§1.1).
+pub const SAMPLE_OFFSET: usize = 168;
 /// Target block interval `T`, seconds (§1.5).
 pub const BLOCK_TIME: i64 = 30;
 /// ASERT half-life `H`, seconds (§1.5).
@@ -15,10 +22,65 @@ pub const HALF_LIFE: i64 = 600;
 pub const MTP_WINDOW: usize = 11;
 /// Maximum future drift against the validating node's clock, seconds (§1.4).
 pub const MAX_FUTURE_DRIFT: u64 = 120;
-/// Compact form of `POW_LIMIT` = 2^236 (§1.3).
-pub const POW_LIMIT_BITS: u32 = 0x1e10_0000;
-/// Compact form of the genesis target 2^232 (§1.3, §4).
-pub const GENESIS_BITS: u32 = 0x1e01_0000;
+/// Compact form of `POW_LIMIT` = 2^252 (§1.3 amended, rewards.md §7
+/// "Difficulty"): 16 expected attempts, about 35 s on one laptop core at
+/// pussy's size and six to seven minutes at bostrom's, so neither chain
+/// stalls below one laptop core. Bostrom's `GENESIS_BITS` is this floor.
+pub const POW_LIMIT_BITS: u32 = 0x2010_0000;
+/// Compact form of pussy's genesis target 2^249 (§1.3, §4; rewards.md §7):
+/// 128 expected attempts, about 25 s for a laptop making 5.06 samples a
+/// second (tru#46 §3.2). The constant the conformance net and the test
+/// genesis files anchor at; the launch chains anchor at [`genesis_bits`].
+pub const GENESIS_BITS: u32 = 0x2002_0000;
+
+/// `GENESIS_BITS` per chain (chain.md §0 amended): pussy 2^249, bostrom the
+/// floor 2^252 (one sample per 7–9 s on twelve threads); any other chain
+/// pussy's.
+pub fn genesis_bits(chain: &str) -> u32 {
+    match chain {
+        "bostrom" => POW_LIMIT_BITS,
+        _ => GENESIS_BITS,
+    }
+}
+
+// ── the settlement ticket (rewards.md §7, chain-economy §0 amended) ────
+
+/// `W_TICKET` per chain: the entries of a ticket,
+/// `max(2, 2^⌊log2(2.5 s / t_solve)⌋)` from the chain's one-thread solve —
+/// pussy 64 (0.036 s, tru#46 §3.1), bostrom 2 (6.0 s, tru epoch receipt
+/// §6.3); `pussy-rc` is pussy's burial state under another name and takes
+/// pussy's. A dev or test net reads `SOFT3_DEV_W_TICKET` (2 when unset):
+/// its graph is not the launch chains' and its solve not measured.
+pub fn w_ticket(chain: &str) -> usize {
+    match chain {
+        "pussy" | "pussy-rc" => 64,
+        "bostrom" => 2,
+        _ => std::env::var("SOFT3_DEV_W_TICKET").ok().and_then(|v| v.trim().parse().ok()).filter(|w| *w >= 1).unwrap_or(2),
+    }
+}
+
+/// `K_MIN`: the sampled marginals a player needs to be paid by their mean
+/// (rewards.md §7 "Deadline, k_min and the payout"; chain-economy §5.2
+/// amended).
+pub const K_MIN: usize = 64;
+
+/// `V_BUDGET = ⌊0.5·T / t_verify⌋`: full sample verifications a node runs
+/// per block interval, all peers together (rewards.md §7 "Verification";
+/// chain.md §5.5 amended): pussy 6 (t_verify 2.2 s), bostrom 2 (7 s on
+/// twelve threads); `pussy-rc` takes pussy's. A dev or test net reads
+/// `SOFT3_DEV_V_BUDGET`, unbounded when unset: its blocks come faster than
+/// the interval the budget renews on.
+pub fn v_budget(chain: &str) -> usize {
+    match chain {
+        "pussy" | "pussy-rc" => 6,
+        "bostrom" => 2,
+        _ => std::env::var("SOFT3_DEV_V_BUDGET").ok().and_then(|v| v.trim().parse().ok()).filter(|b| *b >= 1).unwrap_or(usize::MAX),
+    }
+}
+
+/// `K_BLOCK`: folded tickets a block admits beyond its own (chain-economy
+/// §7.3): 0 while the accumulator's condition is false.
+pub const K_BLOCK: usize = 0;
 /// Header + body budget, bytes (§1.6).
 pub const MAX_BLOCK_BYTES: usize = 262_144;
 /// Transactions per block including the coinbase (§1.6).
@@ -54,10 +116,13 @@ pub const MAX_REORG: u64 = FINALITY_DEPTH - 1;
 /// `E · L` (chain-economy §2.1–§2.2).
 pub const EPOCH_LENGTH: u64 = 240;
 /// `SETTLE_DELAY` (D) = `FINALITY_DEPTH`: settlement of epoch E is a step of
-/// the block at `boundary(E) + D` (chain-economy §2.5).
+/// the block at `boundary(E + 1) + D` — the window of E's tickets is epoch
+/// E + 1 (chain-economy §2.5 amended, rewards.md §7).
 pub const SETTLE_DELAY: u64 = FINALITY_DEPTH;
 /// `MIN_LOCK`: blocks a position's stake stays locked after its last
-/// increase (chain-economy §3.4). Must be at least `L + D`.
+/// increase (chain-economy §3.4 amended). Must be at least `2L + D`: a
+/// position increased in epoch E is still locked at
+/// `settle(E) = boundary(E + 1) + D`.
 pub const MIN_LOCK: u64 = 20_160;
 /// `FOCUS_MAX_BPS`: the focus pool's cap on the subsidy, basis points (§6.1).
 pub const FOCUS_MAX_BPS: u64 = 5_000;
@@ -110,10 +175,10 @@ pub struct EpochClock {
 impl EpochClock {
     pub const SPEC: EpochClock = EpochClock { length: EPOCH_LENGTH, delay: SETTLE_DELAY, min_lock: MIN_LOCK };
 
-    /// `L ≥ D + 1` (one settlement in flight) and `MIN_LOCK ≥ L + D` (stake
+    /// `L ≥ D + 1` (one settlement in flight) and `MIN_LOCK ≥ 2L + D` (stake
     /// added in an epoch is still locked at its settlement), §2.2, §3.4.
     pub fn valid(&self) -> bool {
-        self.delay >= 1 && self.length > self.delay && self.min_lock >= self.length + self.delay
+        self.delay >= 1 && self.length > self.delay && self.min_lock >= 2 * self.length + self.delay
     }
 
     /// `epoch(h) = ceil(h / L)`; height 0 is epoch 0 (§2.1).
@@ -130,14 +195,22 @@ impl EpochClock {
         h % self.length == 0
     }
 
-    /// `settle(E) = boundary(E) + D`.
+    /// `settle(E) = boundary(E + 1) + D`: the window of E's tickets is epoch
+    /// E + 1, in and final by the reorg limit (rewards.md §7).
     pub fn settle(&self, e: u64) -> u64 {
-        self.boundary(e) + self.delay
+        self.boundary(e + 1) + self.delay
     }
 
     /// The epoch E ≥ 1 whose settlement is a step of the block at `h`.
     pub fn settles_at(&self, h: u64) -> Option<u64> {
-        (h > self.delay && (h - self.delay) % self.length == 0).then(|| (h - self.delay) / self.length).filter(|e| *e >= 1)
+        (h > self.delay && (h - self.delay) % self.length == 0).then(|| (h - self.delay) / self.length).filter(|e| *e >= 2).map(|e| e - 1)
+    }
+
+    /// The epoch whose game the block at `h ≥ 1` samples: `epoch(h) − 1`
+    /// (rewards.md §7: the window of E's game is epoch E + 1; epoch 0's game
+    /// is empty).
+    pub fn game_of(&self, h: u64) -> u64 {
+        self.epoch(h).saturating_sub(1)
     }
 
     /// A dev or test clock from `SOFT3_DEV_EPOCH=L:D:MIN_LOCK`; `None` when
@@ -217,7 +290,7 @@ pub fn pow_limit() -> U256 {
     if sim_pow::relaxed() {
         return U256::ONE << 255;
     }
-    U256::ONE << 236
+    U256::ONE << 252
 }
 
 /// The out-of-tree twin of [`test_pow`], behind the `sim` feature: the
@@ -265,9 +338,9 @@ pub mod test_pow {
     pub const EASY_BITS: u32 = 0x2100_8000;
 }
 
-/// The genesis target 2^232.
+/// Pussy's genesis target 2^249 (`GENESIS_BITS`).
 pub fn genesis_target() -> U256 {
-    U256::ONE << 232
+    U256::ONE << 249
 }
 
 /// Subsidy per block for a genesis supply (§3.5). No floats, floor division.
@@ -323,8 +396,11 @@ pub const CHAINS: &[EmbeddedChain] = &[
     EmbeddedChain {
         name: "pussy",
         hrp: "pussy",
-        chain_id: h32("bae85f40d9f508664b5214107551be95d3f188d9585a899178c23e80886720e5"),
-        genesis_block: h32("73208ee2d43fbb0420119ceff23eab79e9d96921050e2a2137d0705c461852d4"),
+        // re-blessed 2026-11-12: the file carries GENESIS_BITS 0x20020000 (2^249) and the
+        // 200-byte block 0 (rewards.md §7, chain.md §0/§1.1 amended); bae85f40… / 73208ee2…
+        // were the 0x1e010000 file and its 168-byte block 0 (conformance/chain-genesis.toml)
+        chain_id: h32("a94ee10120f2d24009f091eb5f620de0e65f67ef2619073988766d50be566d7f"),
+        genesis_block: h32("b5aca6a0446c3fd3080dc8cac4a03c3b0bafc41fe9847b9779f19a6faaeb6e06"),
         genesis_time: 1_793_885_820,
     },
     EmbeddedChain {
@@ -382,6 +458,17 @@ mod tests {
     }
 
     #[test]
+    fn ticket_constants_per_chain() {
+        assert_eq!((w_ticket("pussy"), w_ticket("bostrom"), w_ticket("pussy-rc")), (64, 2, 64));
+        assert_eq!((v_budget("pussy"), v_budget("bostrom"), v_budget("pussy-rc")), (6, 2, 6));
+        assert_eq!(v_budget("test"), usize::MAX);
+        assert_eq!((genesis_bits("pussy"), genesis_bits("bostrom")), (0x2002_0000, 0x2010_0000));
+        assert_eq!(super::super::header::decode_bits(GENESIS_BITS), Ok(U256::ONE << 249));
+        assert_eq!(super::super::header::decode_bits(POW_LIMIT_BITS), Ok(U256::ONE << 252));
+        assert_eq!((K_MIN, K_BLOCK), (64, 0));
+    }
+
+    #[test]
     fn rule_set_table_starts_at_genesis() {
         assert_eq!(rule_set_at(0), Some(1));
         assert_eq!(rule_set_at(u64::MAX), Some(1));
@@ -393,14 +480,16 @@ mod tests {
         let c = EpochClock::SPEC;
         assert!(c.valid());
         assert_eq!((c.epoch(0), c.epoch(1), c.epoch(240), c.epoch(241)), (0, 1, 1, 2));
-        assert_eq!(c.settle(1), 360);
-        assert_eq!(c.settles_at(360), Some(1));
-        assert_eq!(c.settles_at(600), Some(2));
-        assert_eq!((c.settles_at(120), c.settles_at(359), c.settles_at(240)), (None, None, None));
-        assert!(MIN_LOCK >= EPOCH_LENGTH + SETTLE_DELAY);
-        assert!(!EpochClock { length: 10, delay: 10, min_lock: 20 }.valid());
-        assert!(!EpochClock { length: 10, delay: 5, min_lock: 14 }.valid());
-        assert!(EpochClock { length: 10, delay: 5, min_lock: 15 }.valid());
+        assert_eq!(c.settle(1), 600, "the first payout, of epoch 1's game, lands at height 600");
+        assert_eq!(c.settles_at(600), Some(1));
+        assert_eq!(c.settles_at(840), Some(2));
+        assert_eq!((c.settles_at(120), c.settles_at(360), c.settles_at(599), c.settles_at(240)), (None, None, None, None));
+        assert_eq!((c.game_of(1), c.game_of(240), c.game_of(241), c.game_of(480), c.game_of(481)), (0, 0, 1, 1, 2));
+        assert!(MIN_LOCK >= 2 * EPOCH_LENGTH + SETTLE_DELAY);
+        assert_eq!(MIN_LOCK / (2 * EPOCH_LENGTH + SETTLE_DELAY), 33);
+        assert!(!EpochClock { length: 10, delay: 10, min_lock: 30 }.valid());
+        assert!(!EpochClock { length: 10, delay: 5, min_lock: 24 }.valid());
+        assert!(EpochClock { length: 10, delay: 5, min_lock: 25 }.valid());
     }
 
     #[test]

@@ -96,6 +96,13 @@ pub enum BlockError {
     /// Steps 6–8 failed: the block (and every descendant) is invalid; the
     /// peer that served it is scored.
     Invalid(String),
+    /// Step 8: the header passed the id test and its sample fails
+    /// recomputation (chain-wire §5 amended: +100, the forger's price).
+    BadSample(String),
+    /// Step 8 is waiting on this node — the verification budget of the
+    /// interval is spent, or the epoch's game or settlement is not computed:
+    /// the block stays stored and is retried; never scored.
+    Waiting(String),
     /// The local store failed.
     Store(String),
 }
@@ -106,7 +113,8 @@ impl BlockError {
         match self {
             BlockError::Header(e) => e.score(),
             BlockError::Invalid(_) => 10,
-            BlockError::UnknownParent | BlockError::Held | BlockError::Refused(_) | BlockError::Store(_) => 0,
+            BlockError::BadSample(_) => 100,
+            BlockError::UnknownParent | BlockError::Held | BlockError::Waiting(_) | BlockError::Refused(_) | BlockError::Store(_) => 0,
         }
     }
 }
@@ -119,6 +127,8 @@ impl std::fmt::Display for BlockError {
             BlockError::Held => write!(f, "ahead of the clock; held"),
             BlockError::Refused(s) => write!(f, "refused: {s}"),
             BlockError::Invalid(s) => write!(f, "invalid: {s}"),
+            BlockError::BadSample(s) => write!(f, "invalid sample: {s}"),
+            BlockError::Waiting(s) => write!(f, "waiting: {s}"),
             BlockError::Store(s) => write!(f, "store: {s}"),
         }
     }
@@ -244,10 +254,16 @@ pub trait ChainView: Send + Sync + 'static {
     fn counts(&self) -> (u64, u64, u64);
     fn state_root(&self) -> Id;
 
-    /// A header with zero nonce and the body it commits to, from the tip.
-    fn template(&self, to: &Id, txs: &[Vec<u8>], now: u64) -> Result<(Header, Vec<u8>), String>;
+    /// A header with zero nonce and zero sample, the body it commits to,
+    /// and the game it samples, from the tip.
+    fn template(&self, to: &Id, txs: &[Vec<u8>], now: u64) -> Result<(Header, Vec<u8>, std::sync::Arc<crate::chain::ticket::EpochGame>), String>;
     /// The answer of `GET /template` (chain-wire §7), rendered by the kernel.
-    fn template_json(&self, header: &Header, body: &[u8], expires: u64) -> String;
+    fn template_json(&self, header: &Header, body: &[u8], game: &std::sync::Arc<crate::chain::ticket::EpochGame>, expires: u64) -> String;
+    /// The answer of `GET /game/{beacon}`: the game of the epoch the
+    /// boundary block `beacon` closes, for a miner that builds it itself.
+    fn game_json(&self, beacon: &Id) -> Option<String>;
+    /// Retry the blocks that waited on this node's own condition.
+    fn retry_waiting(&self);
     fn events(&self) -> tokio::sync::broadcast::Receiver<ChainEvent>;
     /// Transactions of a body as byte strings (empty when undecodable).
     fn txs_of(&self, body: &[u8]) -> Vec<Vec<u8>> {

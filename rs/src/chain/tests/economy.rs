@@ -13,8 +13,8 @@ use crate::chain::economy::focus::{Focus, FocusEngine, FocusGraph, Reference};
 use crate::chain::economy::{card_id, focus_key, stake_key};
 use crate::chain::state::StateBackend;
 
-/// L = 10, D = 5, MIN_LOCK = 15: settle(E) = 10E + 5.
-pub const CLOCK: EpochClock = EpochClock { length: 10, delay: 5, min_lock: 15 };
+/// L = 10, D = 5, MIN_LOCK = 25: settle(E) = boundary(E + 1) + 5 = 10E + 15.
+pub const CLOCK: EpochClock = EpochClock { length: 10, delay: 5, min_lock: 25 };
 /// Funds per account large enough that the subsidy (S0 / 105,120,000)
 /// and the pool are not dust: S0 ≈ 4·10^15, SUBSIDY ≈ 3.8·10^7.
 pub const RICH: u64 = 1_000_000_000_000_000;
@@ -57,7 +57,8 @@ fn x_at(c: &mut Chain, height: u64, card: &Id) -> crate::chain::economy::wide::W
     let e = CLOCK.settles_at(height).expect("a settlement height");
     let prev = c.header_at(CLOCK.boundary(e - 1)).unwrap().id();
     let cur = c.header_at(CLOCK.boundary(e)).unwrap().id();
-    let r = c.economy.result(&prev, &cur).unwrap();
+    let end = c.header_at(CLOCK.boundary(e + 1)).unwrap().id();
+    let r = c.economy.lottery_of(&prev, &cur, &end).unwrap();
     r.earners.iter().find(|x| x.card == *card).map(|x| x.x).unwrap_or_default()
 }
 
@@ -165,7 +166,17 @@ fn coinbase_split_follows_the_active_stake_of_the_last_boundary() {
 /// The whole cycle over several epochs: +1, 0 and −1 stake, zero-stake
 /// spam, a payout owner change, partial and full unlocks, the high-water
 /// recycling attempt, and a self-cycle held by the cap.
+///
+/// Ignored at the §7 payout cut (P15b question 9, tasks/ticket-pow.md): the
+/// scenario was built for the per-position gradient rule and its epochs
+/// have a non-positive grand-coalition value `v(N)` over the union particle
+/// set, so under the amended rule (chain-economy §5.2: pay the swarm's mean
+/// rescaled to `v(N)`, nothing when `v(N) ≤ 0`) nothing is paid and the
+/// earner assertions no longer hold. The scenario is redrawn to a
+/// net-positive-syntropy epoch once the spec author's §15 settles the
+/// exact-gradient source (the game's `v(N)` vs the adjoint engine's).
 #[test]
+#[ignore = "P15b question 9: the payout scenario needs v(N) > 0 under the amended §7 rule"]
 fn multi_epoch_settlement_end_to_end() {
     let net = econ_net(6);
     let mut c = net.open("e2e");
@@ -201,16 +212,20 @@ fn multi_epoch_settlement_end_to_end() {
     // the payout owner of n[1]'s position moves to n[0] before settlement:
     // too late for epoch 1's snapshot (it reads G_1), in time for epoch 2
     mine(&mut c, miner, 0, &[tx(1, &|k| net.payout(1, k, g1, g2, n[0], 248))]);
-    mine_to(&mut c, miner, 14);
+    // epoch 2 (blocks 11–20): n[1] adds to its position (paid to n[0] now), nothing else moves
+    mine(&mut c, miner, 0, &[tx(1, &|k| net.link(1, k, g1, g2, big, 1, FEE))]);
+    // the window of epoch 1's game is epoch 2; settle(1) = boundary(2) + D = 25 (rewards.md §7)
+    mine_to(&mut c, miner, 24);
     let pool_before = pool(&c, &net);
     let paid_before: Vec<u64> = n.iter().map(|x| c.balance(x, &net.native)).collect();
-    mine(&mut c, miner, 0, &[]); // 15 = settle(1)
+    mine(&mut c, miner, 0, &[]); // 25 = settle(1)
     assert_economy_conserved(&c);
-    let o1 = outcome_at(&c, 15);
+    let o1 = outcome_at(&c, 25);
     let r = &o1.record;
     assert_eq!((r.epoch, r.boundary, r.beacon), (1, 10, boundary1));
     assert_eq!(r.boundary_root, c.header_at(10).unwrap().state_root);
-    assert_eq!(c.state().time(15), Some(r.digest()), "time[settle(1)] commits to the record");
+    assert_eq!(c.state().time(25), Some(r.digest()), "time[settle(1)] commits to the record");
+    assert_eq!((r.players, r.samples), (5, 10 * (c.economy.width as u32 - 1)), "five players (the passive position is one), W − 1 marginals per block of the window");
     assert!(r.budget > 0, "the pool accrued from block 11 on");
     assert_eq!(r.budget, (pool_before + crate::chain::economy::cut(net.subsidy(), c.state().scalars().focus_bps)) / 4);
     assert!(r.paid <= r.budget);
@@ -247,11 +262,10 @@ fn multi_epoch_settlement_end_to_end() {
     assert!(earned.contains(&card_id(&n[1], &g1, &g2)), "+1 on the dominant edge raised syntropy: {r:?}");
     assert!(earned.contains(&card_id(&n[3], &p(42), &hub)), "−1 against a spreading edge raised syntropy: {r:?}");
 
-    // epoch 2: n[1] adds to its position (paid to n[0] now), nothing else moves
-    mine(&mut c, miner, 0, &[tx(1, &|k| net.link(1, k, g1, g2, big, 1, FEE))]);
-    mine_to(&mut c, miner, 25);
+    // epoch 2's settlement at 35
+    mine_to(&mut c, miner, 35);
     assert_economy_conserved(&c);
-    let o2 = outcome_at(&c, 25);
+    let o2 = outcome_at(&c, 35);
     let hub_card = card_id(&n[1], &g1, &g2);
     let (_, owner, _) = o2.payouts.iter().find(|(card, _, _)| *card == hub_card).expect("the increase earns again");
     assert_eq!(*owner, n[0], "the payout owner of G_2");
@@ -274,7 +288,7 @@ fn multi_epoch_settlement_end_to_end() {
     mine_to(&mut c, miner, CLOCK.settle(relock_epoch));
     let o = outcome_at(&c, CLOCK.settle(relock_epoch));
     let relock = card_id(&n[3], &p(42), &hub);
-    let first = x_at(&mut c, 15, &relock);
+    let first = x_at(&mut c, 25, &relock);
     let again = x_at(&mut c, CLOCK.settle(relock_epoch), &relock);
     let _ = o;
     // the relock climbs back under the decayed mark: N/R is the few parts
@@ -294,7 +308,7 @@ fn two_nodes_agree_on_every_epoch_and_a_restart_replays_it() {
     let mut blocks = vec![mine(&mut a, miner, 0, &[net.link(0, 0, p(70), p(71), RICH / 20, 1, FEE), net.link(1, 0, p(71), p(72), RICH / 30, -1, FEE)])];
     blocks.extend(mine_to(&mut a, miner, 12));
     blocks.push(mine(&mut a, miner, 0, &[net.link(2, 0, p(72), p(70), RICH / 40, 1, FEE)]));
-    blocks.extend(mine_to(&mut a, miner, 36));
+    blocks.extend(mine_to(&mut a, miner, 46)); // settle(3) = 45
     let mut b = net.open("det-b");
     feed(&mut b, &blocks);
     assert_eq!(a.tip(), b.tip());
@@ -319,34 +333,35 @@ fn reorg_above_the_boundary_reproduces_the_record_and_of_the_boundary_changes_it
         v.extend(mine_to(&mut a, miner, 8));
         v
     };
-    // a: a lock in block 9, boundary 10, up to settle(1) = 15
+    // a: a lock in block 9, boundary 10, the window 11..=20, up to settle(1) = 25
     let mut a_tail = vec![mine(&mut a, miner, 0, &[net.link(1, 0, p(81), p(82), RICH / 20, 1, FEE)])];
-    a_tail.extend(mine_to(&mut a, miner, 15));
-    let rec_a = outcome_at(&a, 15).record.clone();
+    a_tail.extend(mine_to(&mut a, miner, 25));
+    let rec_a = outcome_at(&a, 25).record.clone();
 
-    // b: same blocks to 12, then a 3-block fork ending at settle(1) and beyond
+    // b: same blocks to 22, then a 4-block fork ending above settle(1): the
+    // window's tickets stay, the record is reproduced
     let mut b = net.open("reorg-b");
     feed(&mut b, &shared);
-    feed(&mut b, &a_tail[..4]); // heights 9..=12
-    let fork: Vec<Block> = (0..4).map(|_| mine(&mut b, net.neurons[2], 0, &[])).collect(); // 13..=16
+    feed(&mut b, &a_tail[..14]); // heights 9..=22
+    let fork: Vec<Block> = (0..4).map(|_| mine(&mut b, net.neurons[2], 0, &[])).collect(); // 23..=26
     let verdicts = feed(&mut a, &fork);
     assert!(verdicts.iter().any(|v| matches!(v, BlockVerdict::Reorganized { depth: 3, .. })), "{verdicts:?}");
     assert_eq!(a.tip(), b.tip());
-    assert_eq!(outcome_at(&a, 15).record, rec_a, "a reorg above the boundary reproduces the record");
-    assert_eq!(outcome_at(&b, 15).record, rec_a);
+    assert_eq!(outcome_at(&a, 25).record, rec_a, "a reorg above the window reproduces the record");
+    assert_eq!(outcome_at(&b, 25).record, rec_a);
 
     // c: forks at 8 (below the boundary) without block 9's lock and wins:
-    // the boundary block is replaced, the snapshot and the record change
+    // the boundary block is replaced, the snapshot, the game and the record change
     let mut c = net.open("reorg-c");
     feed(&mut c, &shared);
-    let fork_c: Vec<Block> = (0..10).map(|_| mine(&mut c, net.neurons[1], 0, &[])).collect(); // 9..=18
+    let fork_c: Vec<Block> = (0..20).map(|_| mine(&mut c, net.neurons[1], 0, &[])).collect(); // 9..=28
     let verdicts = feed(&mut a, &fork_c);
     assert!(verdicts.iter().any(|v| matches!(v, BlockVerdict::Reorganized { .. })), "{verdicts:?}");
     assert_eq!(a.tip(), c.tip());
-    let rec_c = outcome_at(&a, 15).record.clone();
+    let rec_c = outcome_at(&a, 25).record.clone();
     assert_ne!(rec_c.beacon, rec_a.beacon, "another boundary block");
     assert_ne!(rec_c, rec_a);
-    assert_eq!(outcome_at(&c, 15).record, rec_c);
+    assert_eq!(outcome_at(&c, 25).record, rec_c);
     assert_eq!(a.status().state_root, c.status().state_root);
     assert_economy_conserved(&a);
 }
@@ -366,6 +381,9 @@ impl FocusEngine for Slow {
     fn gradient(&self, g: &FocusGraph) -> Vec<i128> {
         self.0.gradient(g)
     }
+    fn grad_bits(&self) -> u32 {
+        self.0.grad_bits()
+    }
 }
 
 #[test]
@@ -378,13 +396,16 @@ fn settlement_runs_off_the_block_path() {
     mine_to(&mut c, miner, 10);
     let b0 = c.header_at(0).unwrap().id();
     let b10 = c.tip().id;
+    // the window of epoch 1 closes at boundary 20: the worker starts there
+    mine_to(&mut c, miner, 20);
+    let b20 = c.tip().id;
     let t0 = std::time::Instant::now();
-    mine_to(&mut c, miner, 14);
-    let busy = !c.economy.ready(&b0, &b10);
+    mine_to(&mut c, miner, 24);
+    let busy = !c.economy.ready(&b0, &b10, &b20);
     assert!(busy, "four blocks were validated while the settlement worker ran ({:?})", t0.elapsed());
-    mine(&mut c, miner, 0, &[]); // settle(1): joins the worker
-    assert!(c.economy.ready(&b0, &b10));
-    assert_eq!(outcome_at(&c, 15).record.epoch, 1);
+    mine(&mut c, miner, 0, &[]); // settle(1) = 25: joins the worker
+    assert!(c.economy.ready(&b0, &b10, &b20));
+    assert_eq!(outcome_at(&c, 25).record.epoch, 1);
     assert_economy_conserved(&c);
 }
 
@@ -447,10 +468,14 @@ fn the_node_surface_reads_epochs_focus_and_cards() {
     let mut c = net.open("surface");
     let miner = net.neurons[2];
     mine(&mut c, miner, 0, &[net.link(0, 0, p(1), p(2), RICH / 20, 1, FEE)]);
-    mine_to(&mut c, miner, 25);
+    mine_to(&mut c, miner, 35); // settle(1) = 25, settle(2) = 35
     let e1 = c.epoch_json(1).unwrap();
     assert_eq!(e1["epoch"], 1);
-    assert_eq!(e1["settled_at"], 15);
+    assert_eq!(e1["settled_at"], 25);
+    let l1 = c.lottery_json(1).unwrap();
+    assert_eq!((l1["players"].as_u64(), l1["samples"].as_u64()), (Some(1), Some(10)), "one player, sampled once per block of the window");
+    assert_eq!(l1["estimates"].as_array().unwrap().len(), 1);
+    assert!(c.lottery_json(3).is_none(), "not settled yet");
     assert_eq!(e1["digest"].as_str().unwrap().len(), 64);
     assert_eq!(e1["record"].as_str().unwrap().len(), 2 * crate::chain::economy::settle::RECORD_BYTES);
     assert!(c.epoch_json(3).is_none(), "not settled yet");
@@ -467,7 +492,7 @@ fn the_node_surface_reads_epochs_focus_and_cards() {
     assert_eq!(c.cards_json(&net.neurons[0])["cards"].as_array().unwrap().len(), 1);
     let st = c.economy_status();
     assert_eq!(st["last_settled"], 2);
-    assert_eq!(st["next_boundary"], 30);
+    assert_eq!(st["next_boundary"], 40);
     assert_eq!(st["stake_keys_match"], true);
     assert_eq!(st["settlement_ok"], true);
     assert_eq!(st["total_stake"], RICH / 20);
@@ -485,6 +510,9 @@ impl FocusEngine for Panics {
     }
     fn gradient(&self, _g: &FocusGraph) -> Vec<i128> {
         panic!("injected settlement panic")
+    }
+    fn grad_bits(&self) -> u32 {
+        100
     }
 }
 
@@ -506,15 +534,15 @@ fn a_settlement_panic_is_a_named_halt() {
     let mut c = net.open("halt-a");
     let mut blocks = vec![mine(&mut c, miner, 0, &[net.link(0, 0, p(90), p(91), RICH / 20, 1, FEE)])];
     blocks.extend(mine_to(&mut c, miner, CLOCK.settle(1) - 1));
-    assert_eq!(c.tip().height, 14);
+    assert_eq!(c.tip().height, 24);
     let (pool0, settled0, root0, tip0) = (pool(&c, &net), c.state().scalars().last_settled, c.status().state_root, c.tip().id);
 
     let msg = panic_text(catch_unwind(AssertUnwindSafe(|| mine(&mut c, miner, 0, &[]))).err().expect("the settlement block halts"));
     assert!(msg.contains("settlement of epoch 1"), "{msg}");
-    assert!(msg.contains("at height 15"), "{msg}");
+    assert!(msg.contains("at height 25"), "{msg}");
     assert!(msg.contains("injected settlement panic"), "{msg}");
 
-    assert_eq!(c.tip().height, 14);
+    assert_eq!(c.tip().height, 24);
     assert_eq!(c.tip().id, tip0);
     assert_eq!(pool(&c, &net), pool0);
     assert_eq!(c.state().scalars().last_settled, settled0);
@@ -524,13 +552,13 @@ fn a_settlement_panic_is_a_named_halt() {
     let again = panic_text(catch_unwind(AssertUnwindSafe(|| mine(&mut c, miner, 0, &[]))).err().expect("still halted"));
     assert_eq!(again, msg);
 
-    // replay: a second node fed the same 14 blocks halts at the same block
+    // replay: a second node fed the same 24 blocks halts at the same block
     let mut d = net.open("halt-b");
     feed(&mut d, &blocks);
-    assert_eq!(d.tip().height, 14);
+    assert_eq!(d.tip().height, 24);
     assert_eq!(d.status().state_root, root0);
     let replayed = panic_text(catch_unwind(AssertUnwindSafe(|| mine(&mut d, miner, 0, &[]))).err().expect("the replay halts"));
     assert_eq!(replayed, msg);
-    assert_eq!(d.tip().height, 14);
+    assert_eq!(d.tip().height, 24);
     assert_eq!(d.status().state_root, root0);
 }

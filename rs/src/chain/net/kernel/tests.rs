@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use super::*;
 use crate::chain::net::codec;
-use crate::chain::tests::{solve, Net, NOW};
+use crate::chain::tests::{solve_on, Net, NOW};
 
 /// A kernel chain behind the port in a scratch directory.
 pub(crate) struct Scratch {
@@ -29,10 +29,11 @@ pub(crate) fn scratch(net: &Net, label: &str) -> Scratch {
     Scratch { chain: KernelChain::open(&net.genesis.bytes, &dir).unwrap(), dir }
 }
 
-/// Template on the tip at `time`, solved (about two hashes at 2^255).
+/// Template on the tip at `time`, solved (about two attempts at 2^255,
+/// each the ticket of its template on the game the template names).
 pub(crate) fn next_block(chain: &KernelChain, to: &Id, time: u64, txs: &[Vec<u8>]) -> (Header, Vec<u8>) {
-    let (h, body) = chain.template(to, txs, time).unwrap();
-    (from_kernel(&solve(to_kernel(&h))), body)
+    let (h, body, game) = chain.template(to, txs, time).unwrap();
+    (from_kernel(&solve_on(&game, to_kernel(&h))), body)
 }
 
 pub(crate) fn mine(chain: &KernelChain, to: &Id, txs: &[Vec<u8>]) -> (Header, Vec<u8>) {

@@ -24,10 +24,14 @@ pub const PHI_BITS: u32 = 60;
 /// The scale of `ln` inside the solves.
 pub const LN_BITS: u32 = 40;
 /// The scale of the reference engine's gradient: `∂J/∂A` in nats per
-/// token at 2^100 (φ at 2^60 times λ at 2^40); tru's is 2^112. Attribution
-/// multiplies it by a stake change and divides it out only as a ratio
-/// (§5.3, §5.5), so the scale cancels in every payout.
+/// token at 2^100 (φ at 2^60 times λ at 2^40); tru's is [`GRAD_BITS_TRU`].
+/// Attribution multiplies it by a stake change and brings the product to
+/// the game's unit, nats at 2^60 (rewards.md §7: the exact gradient is the
+/// cap and the floor of the sampled mean), so an engine names its scale
+/// ([`FocusEngine::grad_bits`]).
 pub const GRAD_BITS: u32 = PHI_BITS + LN_BITS;
+/// tru's epoch engine returns the adjoint gradient at 2^112.
+pub const GRAD_BITS_TRU: u32 = 112;
 
 /// The canonical input of one solve (§4.3).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -95,9 +99,12 @@ pub trait FocusEngine: Send + Sync {
     fn focus(&self, g: &FocusGraph) -> Focus;
 
     /// `∂J(φ*(A))/∂A_pq` for every edge of `g` in edge order, at scale
-    /// 2^[`GRAD_BITS`]: one forward solve to the fixed point of `g`, one
-    /// adjoint solve, one read per edge (§5.1).
+    /// 2^[`FocusEngine::grad_bits`]: one forward solve to the fixed point
+    /// of `g`, one adjoint solve, one read per edge (§5.1).
     fn gradient(&self, g: &FocusGraph) -> Vec<i128>;
+
+    /// The scale of [`FocusEngine::gradient`], log2.
+    fn grad_bits(&self) -> u32;
 }
 
 /// tru's epoch engine (tru `specs/epoch.md`, `tru::focusing::epoch`): the
@@ -150,6 +157,10 @@ impl FocusEngine for Tru {
 
     fn gradient(&self, g: &FocusGraph) -> Vec<i128> {
         tru::focusing::epoch::gradient(&Self::axons(g), &self.params).by_axon
+    }
+
+    fn grad_bits(&self) -> u32 {
+        GRAD_BITS_TRU
     }
 }
 
@@ -332,5 +343,9 @@ impl FocusEngine for Reference {
                 walk + prior
             })
             .collect()
+    }
+
+    fn grad_bits(&self) -> u32 {
+        GRAD_BITS
     }
 }

@@ -1,15 +1,23 @@
-//! Epoch settlement (chain-economy §2.4, §5): the boundary snapshot, the
-//! three solves and the attribution per position — a pure function of two
-//! snapshots, run off the block path ([`compute`]) — and the settlement
-//! step of the block at `settle(E)` ([`apply`]), which only divides the
+//! Epoch settlement (chain-economy §2.4, §5; rewards.md §7 "the payout"):
+//! the boundary snapshot, the solves and the attribution per position — a
+//! pure function of two snapshots and the window's tickets, run off the
+//! block path ([`compute`]) — and the settlement step of the block at
+//! `settle(E) = boundary(E + 1) + D` ([`apply`]), which only divides the
 //! pool's budget by the precomputed weights and writes the result.
+//!
+//! The payout rule (rewards.md §7): a player with `K_MIN` sampled marginals
+//! in the window is paid their mean, one with fewer its exact path gradient;
+//! negative shares clip to zero; when the clipped sum and `v(N)` are both
+//! positive the shares are rescaled to `v(N)`, floored, the dust to the
+//! pool; otherwise nothing is paid and the pool carries.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::super::params::{DOMAIN_EPOCH, POOL_RELEASE, R_MAX_PPM, RHO_LAUNCH};
+use super::super::params::{DOMAIN_EPOCH, K_MIN, POOL_RELEASE, R_MAX_PPM, RHO_LAUNCH};
 use super::super::state::{Id, StateBackend, StateError};
 use super::focus::{FocusEngine, FocusGraph};
+use super::lottery::{Lottery, PlayerEstimate, Sums};
 use super::weights::{GenesisWeights, adjacency, midpoint};
 use super::wide::{W, mul_div};
 use super::{Mark, decay_mark, focus_bps, focus_key, payout_leaf, payouts_root, phi_digest, side_of, stake_key};
@@ -131,12 +139,24 @@ pub struct SettleResult {
     /// the full mark set `H_E`, ascending by axon id
     pub marks: Vec<(Id, Mark)>,
     pub focus: Arc<FocusOut>,
+    /// `v(N)`, the game's value in nats at 2^60 (rewards.md §7)
+    pub value: i128,
+    /// `N`, the players of the game
+    pub players: u32,
+    /// Σ k_c: the sampled marginals the window delivered
+    pub samples: u32,
+    /// players paid by their mean (`k_c ≥ K_MIN`)
+    pub by_mean: u32,
+    /// the lottery's estimate per player, players ascending (served, not
+    /// written into the record)
+    pub lottery: Vec<PlayerEstimate>,
 }
 
-/// The three solves and the attribution (§5.1–§5.4). `prev_focus` is
-/// `(J(φ*_{E−1}))` when the node still holds it; otherwise it is solved.
-pub fn compute(prev: &Snapshot, cur: &Snapshot, weights: &GenesisWeights, engine: &dyn FocusEngine, prev_syntropy: Option<i128>) -> SettleResult {
-    compute_with(prev, cur, weights, engine, prev_syntropy, super::super::params::ATTR_NODES)
+/// The solves and the attribution (§5.1–§5.4), paid by the window's
+/// tickets (rewards.md §7). `prev_syntropy` is `J(φ*_{E−1})` when the node
+/// still holds it; otherwise it is solved.
+pub fn compute(prev: &Snapshot, cur: &Snapshot, weights: &GenesisWeights, engine: &dyn FocusEngine, prev_syntropy: Option<i128>, lottery: &Lottery) -> SettleResult {
+    compute_with(prev, cur, weights, engine, prev_syntropy, super::super::params::ATTR_NODES, lottery)
 }
 
 /// [`compute`] with `quadrature` gradient nodes on the path from `A_prev`
@@ -148,7 +168,9 @@ pub fn compute_with(
     engine: &dyn FocusEngine,
     prev_syntropy: Option<i128>,
     quadrature: usize,
+    lottery: &Lottery,
 ) -> SettleResult {
+    debug_assert_eq!(lottery.game.beacon, cur.block_id, "the lottery's game is this epoch's");
     let a_prev = prev.adjacency(weights);
     let a_cur = cur.adjacency(weights);
     let a_mid = midpoint(&a_prev, &a_cur);
@@ -168,30 +190,14 @@ pub fn compute_with(
         }
     };
 
-    // Δs per card and side (§5.2): a card that changed side is a decrease on
-    // the old side and an increase on the new one
-    let before: BTreeMap<Id, &Position> = prev.positions.iter().map(|p| (p.card, p)).collect();
-    let mut delta: Vec<(&Position, i8, i128)> = Vec::new(); // (position in G_E or G_{E−1}, side, Δs)
+    // the players (§5.2, rewards.md §7 "the game"): one per card and side
+    // with Δs ≠ 0, ascending by card ‖ σ — the game's own index space
+    let game = &lottery.game;
+    let players = &game.players;
     let mut raw_increase: BTreeMap<(Id, i8), u128> = BTreeMap::new(); // R^σ per axon side
-    let mut seen = std::collections::BTreeSet::new();
-    for pos in &cur.positions {
-        seen.insert(pos.card);
-        let sigma = side_of(pos.valence);
-        match before.get(&pos.card) {
-            Some(old) if side_of(old.valence) == sigma => delta.push((pos, sigma, pos.stake as i128 - old.stake as i128)),
-            Some(old) => {
-                delta.push((old, side_of(old.valence), -(old.stake as i128)));
-                delta.push((pos, sigma, pos.stake as i128));
-            }
-            None => delta.push((pos, sigma, pos.stake as i128)),
-        }
-    }
-    for old in prev.positions.iter().filter(|p| !seen.contains(&p.card)) {
-        delta.push((old, side_of(old.valence), -(old.stake as i128)));
-    }
-    for (pos, sigma, d) in &delta {
-        if *d > 0 {
-            *raw_increase.entry((pos.axon, *sigma)).or_insert(0) += *d as u128;
+    for pl in players {
+        if pl.delta > 0 {
+            *raw_increase.entry((super::axon_of(&pl.p, &pl.q), pl.side)).or_insert(0) += pl.delta as u128;
         }
     }
 
@@ -202,31 +208,65 @@ pub fn compute_with(
     };
     let mark_of = |axon: &Id| -> Mark { cur.marks.get(axon).map(|(_, _, m)| *m).unwrap_or_default() };
 
+    // a(c) per player (rewards.md §7 "the payout"): the mean of its sampled
+    // marginals when k_c ≥ K_MIN, else the exact path gradient
+    // a_exact(c) = Δs · σ · ḡ brought to the game's unit, nats at 2^60
+    let sums = Sums::of(game, &lottery.tickets);
+    let exact_of = |pl: &super::super::ticket::Player| -> i128 {
+        let g = grad_of(&pl.p, &pl.q);
+        let signed_g = if pl.side < 0 { -g } else { g };
+        tru::focusing::epoch::fixed::mul_wide_floor(pl.delta, signed_g, engine.grad_bits() - super::focus::PHI_BITS)
+    };
+    let mut estimates: Vec<PlayerEstimate> = players
+        .iter()
+        .enumerate()
+        .map(|(i, pl)| {
+            let exact = exact_of(pl);
+            let k = sums.k[i];
+            let a = if k as usize >= K_MIN { sums.mean(i) } else { exact };
+            PlayerEstimate { card: pl.card, side: pl.side, k, mean: sums.mean(i), stderr: sums.stderr(i), exact, a, paid: 0 }
+        })
+        .collect();
+    let by_mean = estimates.iter().filter(|e| e.k as usize >= K_MIN).count() as u32;
+
+    // the clip and the rescale to v(N): a⁺ = max(0, a); â = ⌊a⁺ · v(N) / Σ a⁺⌋
+    // when Σ a⁺ > 0 and v(N) > 0, else nothing is paid and the pool carries
+    let value = game.value_of_all();
+    let mut positive = W::ZERO;
+    for e in &estimates {
+        positive = positive.checked_add(&W::from_u128(e.a.max(0) as u128)).expect("Σ a⁺ fits 512 bits");
+    }
+    if value > 0 && !positive.is_zero() {
+        let v = W::from_u128(value as u128);
+        for e in estimates.iter_mut() {
+            if e.a > 0 {
+                e.paid = mul_div(&W::from_u128(e.a as u128), &v, &positive).to_u128().expect("â ≤ v(N) fits") as i128;
+            }
+        }
+    }
+
     let current: BTreeMap<Id, &Position> = cur.positions.iter().map(|p| (p.card, p)).collect();
     let mut earners = Vec::new();
-    for (pos, sigma, d) in &delta {
+    for (pl, e) in players.iter().zip(&estimates) {
         // gates (§5.4): the position is in G_E on this side, active, increased
-        let Some(now) = current.get(&pos.card) else { continue };
-        if side_of(now.valence) != *sigma || now.valence == 0 || *d <= 0 {
+        let Some(now) = current.get(&pl.card) else { continue };
+        if side_of(now.valence) != pl.side || now.valence == 0 || pl.delta <= 0 {
             continue;
         }
-        let g = grad_of(&now.p, &now.q);
-        // a(c) = Δs · σ · g; only its positive part earns
-        let signed_g = if *sigma < 0 { -g } else { g };
-        if signed_g <= 0 {
+        // only a positive share earns, and only when the epoch created value
+        if e.paid <= 0 {
             continue;
         }
-        let new_height = side_stake(&now.axon, *sigma).saturating_sub(mark_of(&now.axon).side(*sigma));
+        let new_height = side_stake(&now.axon, pl.side).saturating_sub(mark_of(&now.axon).side(pl.side));
         if new_height == 0 {
             continue;
         }
-        let r = raw_increase[&(now.axon, *sigma)];
-        let a = W::from_u128(*d as u128).checked_mul(&W::from_u128(signed_g as u128)).expect("u64 · i128 fits 256 bits");
-        let x = mul_div(&a, &W::from_u64(new_height.saturating_mul(RHO_LAUNCH)), &W::from_u128(r));
+        let r = raw_increase[&(now.axon, pl.side)];
+        let x = mul_div(&W::from_u128(e.paid as u128), &W::from_u64(new_height.saturating_mul(RHO_LAUNCH)), &W::from_u128(r));
         if x.is_zero() {
             continue;
         }
-        let cap = ((*d as u128 * R_MAX_PPM as u128) / 1_000_000) as u64;
+        let cap = ((pl.delta as u128 * R_MAX_PPM as u128) / 1_000_000) as u64;
         earners.push(Earner { card: now.card, owner: now.owner, x, cap });
     }
     earners.sort_by(|a, b| a.card.cmp(&b.card));
@@ -261,6 +301,11 @@ pub fn compute_with(
         earners,
         marks,
         focus: Arc::new(FocusOut { particles: g_cur.particles, phi: focus.phi, syntropy: focus.syntropy, digest }),
+        value,
+        players: players.len() as u32,
+        samples: sums.samples(),
+        by_mean,
+        lottery: estimates,
     }
 }
 
@@ -324,10 +369,18 @@ pub struct Record {
     pub pool_after: u64,
     pub rewarded: u32,
     pub payouts: Id,
+    /// `N`, the players of the epoch's game (rewards.md §7)
+    pub players: u32,
+    /// Σ k_c, the sampled marginals of the window
+    pub samples: u32,
+    /// players paid by their mean
+    pub by_mean: u32,
+    /// `v(N)` at 2^60, saturated to i64
+    pub value: i64,
 }
 
-/// Record bytes (§5.6).
-pub const RECORD_BYTES: usize = 198;
+/// Record bytes (§5.6 amended: the lottery's four fields after `payouts`).
+pub const RECORD_BYTES: usize = 218;
 
 impl Record {
     pub fn encode(&self) -> Vec<u8> {
@@ -347,6 +400,10 @@ impl Record {
         out.extend_from_slice(&self.pool_after.to_le_bytes());
         out.extend_from_slice(&self.rewarded.to_le_bytes());
         out.extend_from_slice(&self.payouts);
+        out.extend_from_slice(&self.players.to_le_bytes());
+        out.extend_from_slice(&self.samples.to_le_bytes());
+        out.extend_from_slice(&self.by_mean.to_le_bytes());
+        out.extend_from_slice(&self.value.to_le_bytes());
         debug_assert_eq!(out.len(), RECORD_BYTES);
         out
     }
@@ -443,6 +500,10 @@ pub fn apply<S: StateBackend>(state: &mut S, native: &Id, height: u64, r: &Settl
         pool_after: f - paid,
         rewarded: payouts.len() as u32,
         payouts: payouts_root(&leaves),
+        players: r.players,
+        samples: r.samples,
+        by_mean: r.by_mean,
+        value: sat64(r.value),
     };
     state.set_time(height, record.digest());
     let mut s = state.scalars();

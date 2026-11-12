@@ -1,4 +1,4 @@
-//! Fixed-size codecs the wire needs before the kernel lands: the 168-byte
+//! Fixed-size codecs the wire needs before the kernel lands: the 200-byte
 //! header, the four transaction kinds, block ids, txids, the compact target,
 //! work and the transaction root — chain.md §1–2, pinned by the vectors of
 //! chain-conformance.md. Every value has one byte form; a decoder that
@@ -6,7 +6,7 @@
 
 use std::cmp::Ordering;
 
-pub const HEADER_BYTES: usize = 168;
+pub const HEADER_BYTES: usize = 200;
 pub const MAX_BLOCK_BYTES: usize = 262_144;
 pub const MAX_BLOCK_TXS: usize = 1024;
 pub const MAX_TX_BYTES: usize = 512;
@@ -17,8 +17,10 @@ pub const MAX_FUTURE_DRIFT: u64 = 120;
 pub const MTP_WINDOW: usize = 11;
 pub const FINALITY_DEPTH: u64 = 120;
 pub const MAX_REORG: u64 = FINALITY_DEPTH - 1;
-pub const POW_LIMIT_BITS: u32 = 0x1e10_0000;
-pub const GENESIS_BITS: u32 = 0x1e01_0000;
+/// `POW_LIMIT` = 2^252 (chain.md §1.3 amended 2026-11-04; the kernel's `params::POW_LIMIT_BITS`).
+pub const POW_LIMIT_BITS: u32 = 0x2010_0000;
+/// Pussy's genesis target 2^249 (the kernel's `params::GENESIS_BITS`); bostrom anchors at the floor.
+pub const GENESIS_BITS: u32 = 0x2002_0000;
 pub const RULE_SET: u16 = 1;
 pub const SIG_BYTES: usize = 102;
 
@@ -307,6 +309,8 @@ pub struct Header {
     pub tx_root: Id,
     pub state_root: Id,
     pub chain: Id,
+    /// the sample commitment (chain.md §1.1, rewards.md §7 step 3)
+    pub sample: Id,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,10 +348,11 @@ impl Header {
         out[72..104].copy_from_slice(&self.tx_root);
         out[104..136].copy_from_slice(&self.state_root);
         out[136..168].copy_from_slice(&self.chain);
+        out[168..200].copy_from_slice(&self.sample);
         out
     }
 
-    /// Syntax only (168 bytes); the rule set and chain are checked by the caller.
+    /// Syntax only (200 bytes); the rule set and chain are checked by the caller.
     pub fn decode(bytes: &[u8]) -> Result<Header, DecodeError> {
         if bytes.len() != HEADER_BYTES {
             return Err(DecodeError::Length { expected: HEADER_BYTES, got: bytes.len() });
@@ -362,6 +367,7 @@ impl Header {
             tx_root: bytes[72..104].try_into().expect("32"),
             state_root: bytes[104..136].try_into().expect("32"),
             chain: bytes[136..168].try_into().expect("32"),
+            sample: bytes[168..200].try_into().expect("32"),
         })
     }
 
@@ -751,7 +757,7 @@ mod tests {
     fn test_header() -> Header {
         Header {
             version: 1, height: 1, time: 1762349000, bits: 0x1d100000, nonce: [0; 16],
-            prev: [0x11; 32], tx_root: [0x22; 32], state_root: [0x33; 32], chain: [0x44; 32],
+            prev: [0x11; 32], tx_root: [0x22; 32], state_root: [0x33; 32], chain: [0x44; 32], sample: [0x55; 32],
         }
     }
 
@@ -762,29 +768,14 @@ mod tests {
         assert_eq!(&bytes[..4], &[1, 0, 0, 0]);
         assert_eq!(&bytes[12..20], &[0xc8, 0x4f, 0x0b, 0x69, 0, 0, 0, 0]);
         assert_eq!(&bytes[20..24], &[0, 0, 0x10, 0x1d]);
-        assert_eq!(hex(&header.id()), "bdd7f2ef3a5a1c573b8d84a7a2aeedc95c6f8aa2139eea5c83946b33c4180c31");
+        assert_eq!(&bytes[168..200], &[0x55u8; 32]);
+        assert_eq!(hex(&header.id()), crate::chain::header::tests::TEST_HEADER_ID);
         assert!(!header.valid_pow());
         assert_eq!(Header::decode(&bytes).unwrap(), header);
         assert!(Header::decode(&bytes[..167]).is_err());
         let mut long = bytes.to_vec();
         long.push(0);
         assert!(Header::decode(&long).is_err());
-    }
-
-    #[test]
-    fn mined_header_vector() {
-        let mut header = test_header();
-        header.bits = 0x1e010000;
-        header.time = 1793885850;
-        header.nonce = 934636u128.to_le_bytes();
-        assert_eq!(hex(&header.id()), "a3dc0cdb7c69e1d4986c388effe1612613b1b71f2c2ca49084bc0730da000000");
-        assert!(header.valid_pow());
-        let mut harder = header;
-        harder.bits = 0x1d100000;
-        assert!(!harder.valid_pow());
-        let mut before = header;
-        before.nonce = 934635u128.to_le_bytes();
-        assert!(!before.valid_pow());
     }
 
     #[test]

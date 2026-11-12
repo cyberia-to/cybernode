@@ -214,10 +214,12 @@ impl Drop for Net {
     }
 }
 
-/// Nonce search from 0 at the template's target (about two hashes).
-pub fn solve(mut header: Header) -> Header {
+/// Nonce search from 0 at the template's target (about two attempts), each
+/// attempt the ticket of the template on `game` (rewards.md §7).
+pub fn solve_on(game: &super::ticket::EpochGame, mut header: Header) -> Header {
     for n in 0u128.. {
         header.nonce = n.to_le_bytes();
+        game.solve(&mut header, 2);
         if valid_pow(&header) {
             return header;
         }
@@ -225,8 +227,19 @@ pub fn solve(mut header: Header) -> Header {
     unreachable!()
 }
 
+/// [`solve_on`] with the template's own game.
+pub fn solve(t: &Template, header: Header) -> Header {
+    solve_on(&t.game, header)
+}
+
+/// The game the next block on `chain`'s tip samples.
+pub fn game_of(chain: &mut Chain, height: u64) -> std::sync::Arc<super::ticket::EpochGame> {
+    let parent = chain.header_at(height - 1).expect("a parent").id();
+    chain.game_for(&parent, height).expect("the game of the next block")
+}
+
 pub fn block_of(t: &Template) -> Block {
-    Block { header: solve(t.header), body: t.body.clone() }
+    Block { header: solve(t, t.header), body: t.body.clone() }
 }
 
 /// Mine on the tip: template at `time` (0 = parent + 30) with `txs`, solve, accept.
