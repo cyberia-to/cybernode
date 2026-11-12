@@ -134,3 +134,86 @@ fn initial_sync_verifies_at_full_speed_beyond_d() {
     assert_eq!(b.tip().id, a.tip().id);
     assert_eq!(b.flood_state().0, 1, "one branch attempt for the whole chain");
 }
+
+/// R18-14 (third cut): F forged chains of D + 1 PoW-valid headers
+/// above the tip, each root carrying a body so it is a branch attempt. The
+/// budget counts branch attempts: at most V + 1 recomputations per interval (a
+/// slot each, one free continuation), every attempted chain is dead at its first ticket together
+/// with its D descendants, and the honest successor is served once the
+/// window renews (≈ V/(V+F) per interval before that). Review evidence
+/// (loopback, in-process; opens no socket).
+#[test]
+fn long_forged_chains_cost_one_branch_attempt_each() {
+    use crate::chain::params::FINALITY_DEPTH as D;
+    use crate::chain::store::Status;
+    let net = Net::new(2);
+    let mut c = net.open("longflood");
+    let miner = net.neurons[1];
+    mine_n(&mut c, miner, 3);
+    c.set_budget_on(true);
+    c.set_v_budget(1);
+    c.renew_verify_budget();
+    let tip = c.tip().id;
+    let f = 4usize; // 4 × (D + 1) headers, below UNVERIFIED_CAP
+    let mut roots = Vec::new();
+    let mut tails = Vec::new();
+    for i in 0..f {
+        let mut s = [0x77u8; 32];
+        s[..16].copy_from_slice(&(i as u128 + 1).to_le_bytes());
+        let root = forged(&mut c, miner, s);
+        let mut parent = root.header;
+        c.accept_header(&parent, NOW).unwrap();
+        for k in 0..D {
+            let mut h = parent;
+            h.height += 1;
+            h.prev = parent.id();
+            h.time = parent.time + 1;
+            h.bits = c.bits_after(&parent);
+            h.sample = [0x55 ^ (k as u8); 32];
+            for n in 0u128.. {
+                h.nonce = n.to_le_bytes();
+                if valid_pow(&h) {
+                    break;
+                }
+            }
+            c.accept_header(&h, NOW).unwrap();
+            parent = h;
+        }
+        roots.push(root);
+        tails.push(parent.id());
+    }
+    // the chains are contiguous, PoW-valid, D + 1 long, and heavier than the tip
+    assert!(c.store().iter().filter(|(_, e)| e.status != Status::Invalid).map(|(_, e)| e.header.height).max().unwrap() > c.tip().header.height + D);
+    // each root arrives with its body: a branch attempt
+    let mut verdicts = Vec::new();
+    for r in &roots {
+        verdicts.push(format!("{:?}", c.accept_block(r, NOW).map(|v| match v { BlockVerdict::NeedBodies(_) => "NeedBodies".to_string(), o => format!("{o:?}") })));
+    }
+    let dead: Vec<usize> = (0..f).filter(|i| c.entry(&roots[*i].id()).map(|e| e.status) == Some(Status::Invalid)).collect();
+    eprintln!("LONGFLOOD verdicts={verdicts:?} dead={dead:?}");
+    assert_eq!(dead.len(), 2, "V_BUDGET + 1 branch attempts were recomputed (the +1 is the free continuation of the walk from the tip), each root dead at its first ticket");
+    assert!(c.flood_state().0 <= 1, "at most V_BUDGET slots: {}", c.flood_state().0);
+    for i in dead.clone() {
+        let (r, t) = (&roots[i], &tails[i]);
+        assert_eq!(c.entry(&r.id()).map(|e| e.status), Some(Status::Invalid), "the attempted root is dead");
+        assert_eq!(c.entry(t).map(|e| e.status), Some(Status::Invalid), "and its D descendants with it");
+    }
+    assert_eq!(c.tip().id, tip, "no forged chain became the tip");
+    // the honest successor competes with the surviving forged roots by the
+    // local draw: served with probability about V/(V + F) in a window, and
+    // within F + 1 windows for certain, since every window that does not
+    // serve it kills one forged root at its first ticket
+    let honest = block_of(&template(&mut c, miner, 0, &[]));
+    let mut windows = 0usize;
+    loop {
+        c.renew_verify_budget();
+        windows += 1;
+        assert!(windows <= f + 1, "the honest branch was not served within F + 1 windows");
+        let v = c.accept_block(&honest, NOW).or_else(|_| c.try_advance());
+        if c.tip().id == honest.id() {
+            assert!(matches!(v, Ok(BlockVerdict::Extended)), "{v:?}");
+            break;
+        }
+    }
+    eprintln!("LONGFLOOD honest served in window {windows} of at most {}", f + 1);
+}
