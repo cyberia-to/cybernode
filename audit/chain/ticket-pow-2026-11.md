@@ -109,3 +109,18 @@ against a 127.0.0.1 test chain): a zero sample is refused before a budget
 slot, at most `V_BUDGET` forged target-passing headers are recomputed per
 window, the unverified set stays bounded, no forged header becomes the tip,
 and the honest block is served once the window renews.
+
+## final
+
+Three review rounds on cybernode#18 (R18-1…R18-17; task page "P15b ·
+review round 1/2" and the third cut of R18-14), every id disposed on the
+branch. Final head: the commit carrying R18-17 on `feat/ticket-pow` (after
+the reviewer's `37cde9c`, `long_forged_chains_cost_one_branch_attempt_each`).
+build-a at that head: lib **342 passed, 0 failed, 1 ignored** (the
+pre-existing `settlement_cost_on_genesis_files`), `chain_adversary` 2/2,
+`mine_e2e` 1/1, the four flood conformance tests green, `cargo build
+--locked --tests` clean with zero warnings. The build-a scratch
+(`/srv/build/scratch/ticket-pow/`) is removed; the receipt inputs stay at
+`/root/.cache/cyber/genesis/` (the rebuilt pussy, pussy-rc and bostrom files
+and their `.json` reports). The pussy-rc two-node chain on agent-a keeps
+mining toward its first settlement at height 600.
