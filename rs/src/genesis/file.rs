@@ -304,6 +304,7 @@ pub fn block_id(header: &[u8; 200]) -> Id {
 
 /// Generic header encoder (for the conformance vector test).
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub fn header_bytes(
     version: u32,
     height: u64,

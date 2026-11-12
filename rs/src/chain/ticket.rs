@@ -98,7 +98,7 @@ pub fn players(prev: &Snapshot, cur: &Snapshot) -> Vec<Player> {
     for old in prev.positions.iter().filter(|p| !seen.contains(&p.card) && p.stake > 0) {
         out.push(Player { card: old.card, side: side_of(old.valence), delta: -(old.stake as i128), p: old.p, q: old.q, owner: old.owner });
     }
-    out.sort_by(|a, b| (a.card, a.side_byte()).cmp(&(b.card, b.side_byte())));
+    out.sort_by_key(|p| (p.card, p.side_byte()));
     out
 }
 
@@ -192,9 +192,7 @@ impl EpochGame {
     /// `workers` sizes the threads a solve may use ([`solve_threads`]).
     pub fn build(epoch: u64, beacon: Id, base: Vec<Axon<u128>>, players: Vec<Player>, width: usize, workers: usize) -> Result<EpochGame, String> {
         assert!(width >= 1, "W_TICKET is at least 1");
-        let mut params = EpochParams::default();
-        params.steps = PHI_STEPS;
-        params.threads = solve_threads(width, workers, base.len());
+        let params = EpochParams { steps: PHI_STEPS, threads: solve_threads(width, workers, base.len()), ..EpochParams::default() };
         let prev: Vec<TruAxon> = base.iter().map(|(p, q, w)| TruAxon { from: *p, to: *q, weight: *w }).collect();
         let changes: Vec<Change> = players.iter().map(Player::change).collect();
         let game = Game::new(&prev, &changes, &params).map_err(|e| e.to_string())?;
@@ -276,6 +274,7 @@ impl EpochGame {
         self.assemble(nonce, rank, order, &ranks, &values, prefix, probes)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn assemble(&self, nonce: u64, rank: usize, order: Vec<usize>, ranks: &[usize], values: &[i128], prefix: Option<usize>, probes: Vec<Probe>) -> Ticket {
         let mut by_player: Vec<(usize, i128)> = Vec::with_capacity(ranks.len());
         for (k, &j) in ranks.iter().enumerate() {
