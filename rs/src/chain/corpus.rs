@@ -72,6 +72,7 @@ fn chain_error_code(e: &ChainError) -> String {
         ChainError::Store(_) => "store".into(),
         ChainError::VerifyBudget => "verify_budget".into(),
         ChainError::Game(_) => "game".into(),
+        ChainError::Unverified => "unverified_full".into(),
     }
 }
 

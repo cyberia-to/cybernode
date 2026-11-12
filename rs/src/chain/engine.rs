@@ -87,6 +87,12 @@ pub struct Chain {
     pub(super) tie_salt: [u8; 32],
     /// a block waits here when the budget is spent; retried by `try_advance`
     pub(super) budget_spent: bool,
+    /// `V_BUDGET` governs only gossip-delivered headers competing at the
+    /// tip (rewards.md §7 "Verification"); replay from disk and initial
+    /// block download verify at full speed, so a node without `tickets/`
+    /// opens and a node days behind catches up. `false` during replay and
+    /// while the net reports it is catching up (chain-wire §3).
+    pub(super) budget_on: bool,
 }
 
 /// The launch chains: they run the spec's epoch clock and nothing else.
@@ -234,6 +240,7 @@ impl Chain {
             verifications: VecDeque::new(),
             tie_salt: local_salt(),
             budget_spent: false,
+            budget_on: true,
         };
         chain.reverts.check_store(&chain.store).map_err(|e| ChainError::Store(format!("revert table: {e}")))?;
         chain.apply_reverts(home)?;
@@ -381,6 +388,16 @@ impl Chain {
     /// verify the stored roots before readiness (§3.6).
     fn replay(&mut self) -> Result<(), ChainError> {
         let tip = self.store.tip_height();
+        // replay from disk is not a competition at the tip: verify every
+        // stored ticket at full speed, so a node whose `tickets/` cache is
+        // gone still opens (R18-2; rewards.md §7 "Verification").
+        let budget_on = std::mem::replace(&mut self.budget_on, false);
+        let out = self.replay_inner(tip);
+        self.budget_on = budget_on;
+        out
+    }
+
+    fn replay_inner(&mut self, tip: u64) -> Result<(), ChainError> {
         for h in 1..=tip {
             let id = self.store.main_at(h).ok_or_else(|| ChainError::Store(format!("main chain gap at {h}")))?;
             let header = self.store.get(&id).map(|e| e.header).ok_or_else(|| ChainError::Store("missing header".into()))?;
@@ -414,6 +431,41 @@ impl Chain {
             tickets.push(self.economy.tickets.verify(&header, &game).ok()?);
         }
         Some(Lottery { game, tickets })
+    }
+
+    /// The lottery of epoch `e` whose window closes with the block
+    /// `(end_id, end_header)` now being applied at `boundary(e + 1)` — that
+    /// block is not on the main table yet, so it is read from the arguments
+    /// and every earlier window block from the store (R18-3: the settlement
+    /// job starts at the window's close, the D-block head start of
+    /// chain-economy §2.5).
+    fn lottery_closing(&mut self, e: u64, prev: &BlockId, cur: &BlockId, end_id: &BlockId, end_header: &Header) -> Option<Lottery> {
+        let game = self.economy.game(prev, cur)?.ok()?;
+        let c = self.rules.clock;
+        let last = c.boundary(e + 1);
+        let mut tickets = Vec::with_capacity(c.length as usize);
+        for h in c.boundary(e) + 1..=last {
+            let header = if h == last { *end_header } else { self.entry(&self.store.main_at(h)?)?.header };
+            tickets.push(self.economy.tickets.verify(&header, &game).ok()?);
+        }
+        let _ = end_id;
+        Some(Lottery { game, tickets })
+    }
+
+    /// `V_BUDGET` on (live tip) or off (replay, initial download). R18-2.
+    pub(super) fn set_budget_on(&mut self, on: bool) {
+        self.budget_on = on;
+    }
+
+    /// Headers heavier than the tip whose sample this node has not verified
+    /// (`Status::Header` or `Status::Body`, not on the main chain): the set
+    /// `UNVERIFIED_CAP` bounds against a forged-header flood (R18-5).
+    pub(super) fn unverified_above_tip(&self) -> usize {
+        let tip_work = self.entry(&self.tip_id()).map(|e| e.chainwork).unwrap_or(U256::ZERO);
+        self.store
+            .iter()
+            .filter(|(id, e)| e.chainwork > tip_work && matches!(e.status, store::Status::Header | store::Status::Body) && !self.store.on_main(id))
+            .count()
     }
 
     /// The settlement the block at `height` (on the main tip) must carry,
@@ -455,8 +507,13 @@ impl Chain {
     /// budget of `V_BUDGET` full verifications per block interval. A cached
     /// ticket costs nothing and is outside the budget.
     fn verify_sample(&mut self, header: &Header) -> Result<(), ChainError> {
+        // a zero sample is never an honest commitment (R18-5): refuse it
+        // before a game is built or a verification slot is spent
+        if header.sample == [0u8; 32] {
+            return Err(ChainError::Block(apply::BlockError::Sample("the sample is zero".into())));
+        }
         let game = self.game_for(&header.prev, header.height)?;
-        if !self.economy.tickets.is_cached(header) {
+        if self.budget_on && !self.economy.tickets.is_cached(header) {
             let now = Instant::now();
             let interval = Duration::from_secs(BLOCK_TIME as u64);
             while self.verifications.front().is_some_and(|t| now.duration_since(*t) >= interval) {
@@ -488,11 +545,17 @@ impl Chain {
             let epoch = clock.epoch(header.height);
             let supply = self.rules.supply_at(header.height);
             self.economy.on_boundary(&self.state, epoch, id, header.state_root, supply);
-            // the window of epoch E − 1 closed with this block: its settlement starts now
+            // the window of epoch E = epoch − 1 closes with this boundary
+            // block: start its settlement now, D blocks before settle(E), on
+            // a worker thread (R18-3, chain-economy §2.5). This block is not
+            // on the main table yet, so it is `end` and the window's last
+            // ticket; `prev` and `cur` are earlier boundaries on main.
             if epoch >= 2 {
-                if let Some((prev, cur, end)) = self.settlement_key(epoch - 1) {
-                    if let Some(lottery) = self.lottery_of(epoch - 1, &prev, &cur) {
-                        self.economy.start(prev, cur, end, lottery);
+                let c = self.rules.clock;
+                let e = epoch - 1;
+                if let (Some(prev), Some(cur)) = (self.store.main_at(c.boundary(e - 1)), self.store.main_at(c.boundary(e))) {
+                    if let Some(lottery) = self.lottery_closing(e, &prev, &cur, &id, header) {
+                        self.economy.start(prev, cur, id, lottery);
                     }
                 }
             }

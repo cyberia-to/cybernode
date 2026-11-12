@@ -264,6 +264,10 @@ pub trait ChainView: Send + Sync + 'static {
     fn game_json(&self, beacon: &Id) -> Option<String>;
     /// Retry the blocks that waited on this node's own condition.
     fn retry_waiting(&self);
+    /// Turn the `V_BUDGET` sample-verification throttle on (live tip) or off
+    /// (initial block download, catching up): rewards.md §7 governs the tip
+    /// only, so a node behind verifies at full speed (R18-2).
+    fn set_verify_budget(&self, on: bool);
     fn events(&self) -> tokio::sync::broadcast::Receiver<ChainEvent>;
     /// Transactions of a body as byte strings (empty when undecodable).
     fn txs_of(&self, body: &[u8]) -> Vec<Vec<u8>> {

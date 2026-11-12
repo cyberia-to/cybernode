@@ -81,6 +81,13 @@ pub fn v_budget(chain: &str) -> usize {
 /// `K_BLOCK`: folded tickets a block admits beyond its own (chain-economy
 /// §7.3): 0 while the accumulator's condition is false.
 pub const K_BLOCK: usize = 0;
+/// `UNVERIFIED_CAP`: headers heavier than the tip whose sample this node has
+/// not yet verified that it keeps in its store at once (R18-5, the forged-
+/// header flood). A forged target-passing header costs its sender
+/// `2^256/target` hashes; this bounds what a flood of them can store on a
+/// node to a constant, independent of the flood's size. Comfortably above
+/// `FINALITY_DEPTH` honest headers in flight on any branch.
+pub const UNVERIFIED_CAP: usize = 512;
 /// Header + body budget, bytes (§1.6).
 pub const MAX_BLOCK_BYTES: usize = 262_144;
 /// Transactions per block including the coinbase (§1.6).

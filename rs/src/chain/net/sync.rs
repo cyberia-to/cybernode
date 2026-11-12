@@ -87,10 +87,16 @@ async fn pass(inner: &Arc<Inner>, preferred: Option<EndpointId>, refresh: bool) 
             break;
         }
     }
+    // off the budget while a heavier chain's bodies come down (R18-2:
+    // V_BUDGET is for competing tips, not catch-up), back on at the tip
+    let behind = inner.chain.best_header().height > inner.chain.tip().height + 2;
+    inner.chain.set_verify_budget(!behind);
     body_sync(inner).await;
     let tip = inner.chain.tip();
     let best = inner.chain.best_header();
-    inner.catching_up.store(best.height > tip.height + 2, Ordering::Relaxed);
+    let behind = best.height > tip.height + 2;
+    inner.chain.set_verify_budget(!behind);
+    inner.catching_up.store(behind, Ordering::Relaxed);
 }
 
 /// §3.1 steps 1–2: status, then `g` by locator until a short response.

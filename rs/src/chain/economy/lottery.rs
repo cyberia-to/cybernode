@@ -60,6 +60,10 @@ impl Sums {
             for (&c, &m) in t.covered.iter().zip(&t.marginals) {
                 if c < n {
                     s.k[c] += 1;
+                    // `saturating_add` is unreachable here (a marginal is a J
+                    // difference under 2^124 and an epoch holds L·(W−1) ≤ 15,120
+                    // of them, the sum far below i128::MAX ≈ 2^127); it guards a
+                    // malformed cached ticket rather than an honest overflow (R18-12)
                     s.sum[c] = s.sum[c].saturating_add(m);
                     let r = m >> 30;
                     s.sq[c] = s.sq[c].saturating_add(r.saturating_mul(r));
@@ -99,6 +103,8 @@ fn isqrt_i128(n: i128) -> i128 {
 pub struct Tickets {
     /// the game of epoch E by the id of `boundary(E)`
     games: HashMap<Id, Arc<EpochGame>>,
+    /// the served `GET /game/{beacon}` JSON, built once per game (R18-8)
+    json: HashMap<Id, Arc<str>>,
     /// the verified ticket of a block by its id, with the block's height
     tickets: HashMap<Id, (u64, Arc<Ticket>)>,
     dir: Option<PathBuf>,
@@ -111,7 +117,24 @@ impl Tickets {
         if let Some(d) = &dir {
             let _ = std::fs::create_dir_all(d);
         }
-        Tickets { games: HashMap::new(), tickets: HashMap::new(), dir, workers: workers.max(1) }
+        Tickets { games: HashMap::new(), json: HashMap::new(), tickets: HashMap::new(), dir, workers: workers.max(1) }
+    }
+
+    /// `GET /game/{beacon}` (R18-8): the game's JSON, built once and cached,
+    /// served only for a game of epoch `≥ min_epoch` (the current and the
+    /// previous, so an unauthenticated caller cannot make the node rebuild
+    /// an arbitrary old game — bostrom's is about half a gigabyte).
+    pub fn game_json(&mut self, beacon: &Id, min_epoch: u64) -> Option<Arc<str>> {
+        let g = self.games.get(beacon)?.clone();
+        if g.epoch < min_epoch {
+            return None;
+        }
+        if let Some(j) = self.json.get(beacon) {
+            return Some(j.clone());
+        }
+        let j: Arc<str> = Arc::from(super::super::ticket::GameWire::of(&g).to_json().as_str());
+        self.json.insert(*beacon, j.clone());
+        Some(j)
     }
 
     pub fn game(&self, boundary: &Id) -> Option<Arc<EpochGame>> {
@@ -189,6 +212,7 @@ impl Tickets {
     /// below `floor` (the disk keeps them for a replay).
     pub fn prune(&mut self, keep_games: impl Fn(&Id) -> bool, floor: u64) {
         self.games.retain(|id, _| keep_games(id));
+        self.json.retain(|id, _| keep_games(id));
         self.tickets.retain(|_, (h, _)| *h >= floor);
     }
 

@@ -64,7 +64,7 @@ fn header_error(e: ChainError) -> HeaderError {
         e @ (ChainError::DeepFork { .. } | ChainError::Checkpoint { .. } | ChainError::CheckpointRejected(_)) => HeaderError::Refused(e.to_string()),
         ChainError::Store(s) => HeaderError::Store(s),
         // the callers route these before mapping
-        e @ (ChainError::UnknownParent(_) | ChainError::FutureTime { .. } | ChainError::Block(_) | ChainError::VerifyBudget | ChainError::Game(_)) => HeaderError::Syntax(e.to_string()),
+        e @ (ChainError::UnknownParent(_) | ChainError::FutureTime { .. } | ChainError::Block(_) | ChainError::VerifyBudget | ChainError::Game(_) | ChainError::Unverified) => HeaderError::Syntax(e.to_string()),
     }
 }
 
@@ -464,7 +464,7 @@ impl ChainView for KernelChain {
                 inner.best = None;
                 Err(BlockError::BadSample(e.to_string()))
             }
-            Err(e @ (ChainError::VerifyBudget | ChainError::Game(_) | ChainError::Block(crate::chain::apply::BlockError::Settlement { .. }))) => Err(BlockError::Waiting(e.to_string())),
+            Err(e @ (ChainError::VerifyBudget | ChainError::Game(_) | ChainError::Unverified | ChainError::Block(crate::chain::apply::BlockError::Settlement { .. }))) => Err(BlockError::Waiting(e.to_string())),
             Err(ChainError::Block(e)) => {
                 // statuses changed (the block and its descendants are invalid)
                 inner.best = None;
@@ -606,7 +606,14 @@ impl ChainView for KernelChain {
         Template { header: to_kernel(header), target, body: body.to_vec(), txids: Vec::new(), fees: 0, game: game.clone() }.json(&self.name, expires)
     }
     fn game_json(&self, beacon: &Id) -> Option<String> {
-        self.lock().chain.economy.tickets.game(beacon).map(|g| crate::chain::ticket::GameWire::of(&g).to_json())
+        let mut inner = self.lock();
+        // serve the current game and the previous one only (R18-8)
+        let tip = inner.chain.tip().header.height;
+        let min_epoch = inner.chain.rules().clock.game_of(tip + 1).saturating_sub(1);
+        inner.chain.economy.tickets.game_json(beacon, min_epoch).map(|j| j.to_string())
+    }
+    fn set_verify_budget(&self, on: bool) {
+        self.lock().chain.set_budget_on(on);
     }
     fn retry_waiting(&self) {
         let mut inner = self.lock();

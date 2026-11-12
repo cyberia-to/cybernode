@@ -126,6 +126,14 @@ impl ChainApi for Chain {
                 return Err(e);
             }
         };
+        // bound the unverified set above the tip against a forged-header
+        // flood (R18-5): once it is full, admit a new header only if it is
+        // heavier than the tip by more than one block's work is not enough —
+        // forged headers share the honest work — so refuse any further
+        // unverified header until the set drains (it is re-offered later).
+        if self.unverified_above_tip() >= super::params::UNVERIFIED_CAP {
+            return Err(ChainError::Unverified);
+        }
         self.store.put_header(*header, work, store::Status::Header).map_err(ChainError::Store)?;
         self.heaviest = self.heaviest.max(work);
         Ok(HeaderVerdict::Accepted)
