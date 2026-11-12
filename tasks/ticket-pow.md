@@ -160,3 +160,57 @@ one closest to tru#46); none is resolved silently.
 - the forged-header flood tool (an `examples/` binary that submits
   target-passing headers with random samples to measure `V_BUDGET`): not
   written.
+
+## P15b · review round 1 disposition (2026-11-12)
+
+Every id of cybernode#18's review (R18-1…R18-12) disposed on `feat/ticket-pow`:
+
+- R18-1 (blocking) — fixed: the callers (`run-node.sh`, `chain-fleet.nu`,
+  `chain_adversary.rs`, README) pass no `--backend`; the miner is the ticket.
+- R18-2 (blocking) — fixed: `V_BUDGET` governs only gossip headers at the
+  tip (`budget_on`); replay and the sync pass verify at full speed, so a node
+  without `tickets/` opens and a node behind catches up. The per-interval
+  budget's silence on catch-up is logged for tru#45 below.
+- R18-3 — fixed: the settlement job starts from the boundary block being
+  applied (D blocks before `settle(E)`), not by reading the main table.
+- R18-4 — deferred with evidence: the sample is verified under the chain
+  mutex still; the receipt reports the lock-hold time. Moving the solve out
+  of the lock (`spawn_blocking`) is a follow-up; the budget and the store cap
+  bound the exposure meanwhile.
+- R18-5 — fixed: a zero sample is refused before a game or a budget slot; the
+  unverified set above the tip is capped (`UNVERIFIED_CAP = 512`).
+- R18-6 / question 9 — corrected: the page's "the mean path is what the
+  launch chains run" was wrong. bostrom (`W_TICKET` 2) pays `k_c ≥ 64` only
+  for `N ≤ 3`, and pussy epochs with `N > 236` pay by the exact gradient, so
+  the exact gradient is a launch payout, not an edge. The exact-gradient
+  source is the consensus epoch engine — tru#46's `Game` base, the one the
+  node settles with — so the mean, the exact value and `v(N)` are one engine
+  (reading A); relayed to tru#45's author as the question-9 decision.
+- R18-7 — fixed: the ticket cache record carries a hemera checksum over
+  every field.
+- R18-8 — fixed: `GET /game/{beacon}` cached per game, served only for the
+  current and previous epoch.
+- R18-10 — fixed: soft3 `crate/Cargo.lock` regenerated (GPU crates dropped);
+  the bless exception is stated in soft3#682.
+- R18-11 — fixed: the hemera ^0.4 pin is committed on tru#46
+  (`feat/coalition-marginal`, 3cd4e45), so cybernode's lock resolves from
+  origin.
+- R18-12 — fixed: the base-canonical assert, the `Sums` saturating comment,
+  the store re-sync note, the harness log pid.
+
+## for tru#45 (R18-9 spec gaps, relayed)
+
+1. Amendment 1.7 writes the probe against `A_E / φ*_E`; §7 and tru#46 say
+   `A_{E−1}`, which the code follows — fix the amendment text.
+2. `cluster(E) = hemera(D_CLUSTER ‖ N ‖ (card ‖ side)…)` pins no widths: the
+   code writes `N` as u32 LE and the side as an i8 byte (+1 = 0x01,
+   −1 = 0xff) — pin both in §7 and add a chain-conformance vector.
+3. The 218-byte epoch record (`players`, `samples`, `by_mean` u32, `value`
+   i64) has no amendment; chain-economy §5.6 and chain-conformance need one.
+4. `r = u64_le(h[8..16]) mod N` is undefined at `N = 0`; tru and the code
+   take 0 — state it.
+5. `V_BUDGET` per interval is silent on catch-up: state that replay and
+   blocks buried deeper than D are outside the budget (the code exempts them).
+6. Question 9: §7 names `a^exact` the "four-node path gradient of epoch §4"
+   (reading A); the exact-gradient source is the consensus epoch engine. The
+   task page no longer claims §15 changes this.
