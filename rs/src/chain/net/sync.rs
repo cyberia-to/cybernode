@@ -87,16 +87,15 @@ async fn pass(inner: &Arc<Inner>, preferred: Option<EndpointId>, refresh: bool) 
             break;
         }
     }
-    // off the budget while a heavier chain's bodies come down (R18-2:
-    // V_BUDGET is for competing tips, not catch-up), back on at the tip
-    let behind = inner.chain.best_header().height > inner.chain.tip().height + 2;
-    inner.chain.set_verify_budget(!behind);
+    // off the budget only while the node is behind a chain it has verified
+    // by more than D (R18-2, R18-14): decided by applied headers, never by
+    // unverified ones, so a few cheap forged headers cannot switch it off
+    inner.chain.set_verify_budget(!inner.chain.behind_verified());
     body_sync(inner).await;
     let tip = inner.chain.tip();
     let best = inner.chain.best_header();
-    let behind = best.height > tip.height + 2;
-    inner.chain.set_verify_budget(!behind);
-    inner.catching_up.store(behind, Ordering::Relaxed);
+    inner.chain.set_verify_budget(!inner.chain.behind_verified());
+    inner.catching_up.store(best.height > tip.height + 2, Ordering::Relaxed);
 }
 
 /// §3.1 steps 1–2: status, then `g` by locator until a short response.

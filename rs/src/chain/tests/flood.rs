@@ -53,10 +53,12 @@ fn forged_header_flood_is_bounded_by_v_budget_and_the_store_cap() {
     assert!(matches!(c.accept_block(&z, NOW), Err(ChainError::Block(BlockError::Sample(_)))));
     assert_eq!(c.flood_state().0, 0, "a zero sample costs no verification");
 
-    // F random-sample forged headers at the tip: each passes the id test and
-    // fails the sample. The first V_BUDGET are recomputed and rejected; the
-    // rest wait for the window, stored but never verified past the budget.
-    let f = 20usize;
+    // F > 2 × UNVERIFIED_CAP random-sample forged headers at the tip: each
+    // passes the id test and fails the sample. The first V_BUDGET are
+    // recomputed and rejected; the rest wait for the window, stored; once the
+    // set is at the cap every further one evicts the oldest (R18-15), so the
+    // store never grows past the cap and nothing is refused.
+    let f = 2 * UNVERIFIED_CAP + 16;
     let (mut rejected, mut waited) = (0usize, 0usize);
     for i in 0..f {
         let mut s = [0x9cu8; 32];
@@ -72,16 +74,19 @@ fn forged_header_flood_is_bounded_by_v_budget_and_the_store_cap() {
     assert!(spent <= 3, "at most V_BUDGET full recomputations in the window: {spent}");
     assert_eq!(rejected, 3, "exactly V_BUDGET forged headers were recomputed and rejected");
     assert_eq!(waited, f - 3, "the rest waited for the window without a recomputation");
-    // the store stays bounded under the flood: at most UNVERIFIED_CAP
-    // unverified headers above the tip (the admission gate in accept_header
-    // refuses beyond it; here the flood is below the cap)
-    assert!(unverified <= UNVERIFIED_CAP, "the unverified store is bounded: {unverified}");
+    // the store is at the cap and no further: the flood reached it and every
+    // later forgery evicted an older one (lowest chainwork, oldest first)
+    assert_eq!(unverified, UNVERIFIED_CAP, "the unverified store holds exactly the cap under a 2×cap flood");
     assert_eq!(c.tip().id, tip, "no forged header became the tip");
+    // the forged headers above the tip are unverified work: they never make
+    // the node think it is catching up, so the budget stays on (R18-14)
+    assert!(!c.behind_verified_for_test(), "unverified headers never count as verified chainwork");
+    c.set_budget_on(true);
 
     // the honest block of the same height is served once the budget renews —
     // a flood delays it, it never starves it (rewards.md §7 "Verification")
     c.renew_verify_budget();
     let honest = block_of(&template(&mut c, miner, 0, &[]));
-    assert_eq!(c.accept_block(&honest, NOW), Ok(BlockVerdict::Extended), "the honest block is served after the window renews");
+    assert_eq!(c.accept_block(&honest, NOW), Ok(BlockVerdict::Extended), "the honest block is admitted (an eviction made room) and served after the window renews");
     assert_eq!(c.tip().id, honest.id());
 }

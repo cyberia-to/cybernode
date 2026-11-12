@@ -116,11 +116,6 @@ pub enum ChainError {
     /// step 8: the game the block samples cannot be built on this node
     /// yet (a boundary snapshot it does not hold) — never the block's fault
     Game(String),
-    /// the node's store of unverified headers above the tip is at
-    /// `UNVERIFIED_CAP`; this header is not admitted (R18-5, the forged-
-    /// header flood) and is re-offered when the set drains — never the
-    /// block's fault, never scored
-    Unverified,
 }
 
 impl ChainError {
@@ -128,7 +123,7 @@ impl ChainError {
     /// node's own condition — a settlement or a game not computed, a spent
     /// verification budget — after which the same block may be accepted?
     pub fn is_blocks_fault(&self) -> bool {
-        !matches!(self, ChainError::VerifyBudget | ChainError::Game(_) | ChainError::Unverified | ChainError::Block(BlockError::Settlement { .. }))
+        !matches!(self, ChainError::VerifyBudget | ChainError::Game(_) | ChainError::Block(BlockError::Settlement { .. }))
     }
 }
 
@@ -153,7 +148,6 @@ impl std::fmt::Display for ChainError {
             ChainError::Store(e) => write!(f, "store: {e}"),
             ChainError::VerifyBudget => write!(f, "the sample verification budget of this interval is spent; retry"),
             ChainError::Game(s) => write!(f, "the epoch's game is not available: {s}"),
-            ChainError::Unverified => write!(f, "the unverified-header store is full; the header is re-offered later"),
         }
     }
 }

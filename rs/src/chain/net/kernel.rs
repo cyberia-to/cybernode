@@ -64,7 +64,7 @@ fn header_error(e: ChainError) -> HeaderError {
         e @ (ChainError::DeepFork { .. } | ChainError::Checkpoint { .. } | ChainError::CheckpointRejected(_)) => HeaderError::Refused(e.to_string()),
         ChainError::Store(s) => HeaderError::Store(s),
         // the callers route these before mapping
-        e @ (ChainError::UnknownParent(_) | ChainError::FutureTime { .. } | ChainError::Block(_) | ChainError::VerifyBudget | ChainError::Game(_) | ChainError::Unverified) => HeaderError::Syntax(e.to_string()),
+        e @ (ChainError::UnknownParent(_) | ChainError::FutureTime { .. } | ChainError::Block(_) | ChainError::VerifyBudget | ChainError::Game(_)) => HeaderError::Syntax(e.to_string()),
     }
 }
 
@@ -464,7 +464,7 @@ impl ChainView for KernelChain {
                 inner.best = None;
                 Err(BlockError::BadSample(e.to_string()))
             }
-            Err(e @ (ChainError::VerifyBudget | ChainError::Game(_) | ChainError::Unverified | ChainError::Block(crate::chain::apply::BlockError::Settlement { .. }))) => Err(BlockError::Waiting(e.to_string())),
+            Err(e @ (ChainError::VerifyBudget | ChainError::Game(_) | ChainError::Block(crate::chain::apply::BlockError::Settlement { .. }))) => Err(BlockError::Waiting(e.to_string())),
             Err(ChainError::Block(e)) => {
                 // statuses changed (the block and its descendants are invalid)
                 inner.best = None;
@@ -614,6 +614,9 @@ impl ChainView for KernelChain {
     }
     fn set_verify_budget(&self, on: bool) {
         self.lock().chain.set_budget_on(on);
+    }
+    fn behind_verified(&self) -> bool {
+        self.lock().chain.behind_verified()
     }
     fn retry_waiting(&self) {
         let mut inner = self.lock();

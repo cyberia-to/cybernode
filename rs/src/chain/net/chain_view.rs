@@ -268,6 +268,11 @@ pub trait ChainView: Send + Sync + 'static {
     /// (initial block download, catching up): rewards.md §7 governs the tip
     /// only, so a node behind verifies at full speed (R18-2).
     fn set_verify_budget(&self, on: bool);
+    /// Is the node behind a chain it has verified by more than D blocks
+    /// (R18-14)? Decided by applied headers only — an unverified header,
+    /// however heavy its claimed work, never counts — so the budget cannot be
+    /// switched off by cheap forged headers.
+    fn behind_verified(&self) -> bool;
     fn events(&self) -> tokio::sync::broadcast::Receiver<ChainEvent>;
     /// Transactions of a body as byte strings (empty when undecodable).
     fn txs_of(&self, body: &[u8]) -> Vec<Vec<u8>> {

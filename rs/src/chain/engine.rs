@@ -6,7 +6,7 @@
 //! [`super::engine_api`]; mempool and template entry points in
 //! [`super::engine_tx`].
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -93,6 +93,15 @@ pub struct Chain {
     /// opens and a node days behind catches up. `false` during replay and
     /// while the net reports it is catching up (chain-wire §3).
     pub(super) budget_on: bool,
+    /// when each unverified header arrived (R18-15: a header without a body
+    /// for longer than one interval is evicted); dropped on verify or evict
+    pub(super) arrivals: HashMap<BlockId, Instant>,
+    /// the node's measured verification time, an EMA in milliseconds of
+    /// its last full recomputations (R18-4): `V_BUDGET = ⌊0.5·T / t_verify⌋`
+    /// follows it, floor 1; seeded from the chain's nominal budget
+    pub(super) verify_ema_ms: u64,
+    /// a pinned budget (tests only); `None` follows the EMA
+    pub(super) v_budget_pinned: Option<usize>,
 }
 
 /// The launch chains: they run the spec's epoch clock and nothing else.
@@ -216,6 +225,7 @@ impl Chain {
         economy.background = !opts.inline_settlement;
         economy.quadrature = if opts.quadrature == 0 { super::params::ATTR_NODES } else { opts.quadrature };
         economy.on_boundary(&state, 0, block0.id(), root0, rules.s0);
+        let verify_ema_ms = (BLOCK_TIME as u64 * 500 / rules.v_budget.max(1) as u64).max(1);
         let mut chain = Chain {
             genesis,
             rules,
@@ -241,6 +251,9 @@ impl Chain {
             tie_salt: local_salt(),
             budget_spent: false,
             budget_on: true,
+            arrivals: HashMap::new(),
+            verify_ema_ms,
+            v_budget_pinned: None,
         };
         chain.reverts.check_store(&chain.store).map_err(|e| ChainError::Store(format!("revert table: {e}")))?;
         chain.apply_reverts(home)?;
@@ -460,7 +473,13 @@ impl Chain {
     /// Set `V_BUDGET` (tests: the flood conformance test pins a small one).
     #[cfg(test)]
     pub(crate) fn set_v_budget(&mut self, b: usize) {
-        self.rules.v_budget = b;
+        self.v_budget_pinned = Some(b.max(1));
+    }
+
+    /// Is the budget decided by verified chainwork saying the node is behind?
+    #[cfg(test)]
+    pub(crate) fn behind_verified_for_test(&self) -> bool {
+        self.behind_verified()
     }
 
     /// Verifications spent in the open window, and the unverified set above
@@ -487,6 +506,62 @@ impl Chain {
             .iter()
             .filter(|(id, e)| e.chainwork > tip_work && matches!(e.status, store::Status::Header | store::Status::Body) && !self.store.on_main(id))
             .count()
+    }
+
+    /// Make room in the unverified set (R18-15): forget every header that has
+    /// waited for its body longer than one interval, then, while the set is
+    /// at `UNVERIFIED_CAP`, forget the entry of lowest chainwork — among
+    /// equals a header without a body before one with, then the oldest. A
+    /// forgotten header is not remembered as rejected: re-offering it costs
+    /// its sender the work again, and the store never grows past the cap.
+    pub(super) fn evict_unverified(&mut self) {
+        let now = Instant::now();
+        let interval = Duration::from_secs(BLOCK_TIME as u64);
+        let tip_work = self.entry(&self.tip_id()).map(|e| e.chainwork).unwrap_or(U256::ZERO);
+        let unverified = |id: &BlockId, e: &store::Entry, on_main: bool| e.chainwork > tip_work && matches!(e.status, store::Status::Header | store::Status::Body) && !on_main && id != &[0u8; 32];
+        let stale: Vec<BlockId> = self
+            .store
+            .iter()
+            .filter(|(id, e)| unverified(id, e, self.store.on_main(id)) && e.status == store::Status::Header && self.arrivals.get(*id).is_some_and(|t| now.duration_since(*t) >= interval))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            self.forget_unverified(&id);
+        }
+        while self.unverified_above_tip() >= super::params::UNVERIFIED_CAP {
+            let victim = self
+                .store
+                .iter()
+                .filter(|(id, e)| unverified(id, e, self.store.on_main(id)))
+                .min_by_key(|(_, e)| (e.chainwork, u8::from(e.status == store::Status::Body), e.seq))
+                .map(|(id, _)| *id);
+            match victim {
+                Some(id) => self.forget_unverified(&id),
+                None => break,
+            }
+        }
+    }
+
+    fn forget_unverified(&mut self, id: &BlockId) {
+        if self.store.forget(id).is_ok() {
+            self.arrivals.remove(id);
+            self.heaviest = self.store.iter().filter(|(_, e)| e.status != store::Status::Invalid).map(|(_, e)| e.chainwork).max().unwrap_or(U256::ZERO);
+        }
+    }
+
+    /// Is this node behind a chain it has *verified* by more than D blocks
+    /// (R18-14)? Only an applied (`Valid`) header above the tip counts —
+    /// never an unverified header, however much work its id claims, so a
+    /// handful of cheap forged headers cannot switch the budget off.
+    pub(super) fn behind_verified(&self) -> bool {
+        let tip_h = self.store.tip_height();
+        self.store.iter().any(|(_, e)| e.status == store::Status::Valid && e.header.height > tip_h + FINALITY_DEPTH)
+    }
+
+    /// The budget in force: the pinned one (tests) or `⌊0.5·T / t_verify⌋`
+    /// from the node's measured verification time, floor 1 (R18-4).
+    pub(super) fn effective_v_budget(&self) -> usize {
+        self.v_budget_pinned.unwrap_or_else(|| ((BLOCK_TIME as u64 * 500) / self.verify_ema_ms.max(1)).max(1) as usize)
     }
 
     /// The settlement the block at `height` (on the main tip) must carry,
@@ -540,13 +615,23 @@ impl Chain {
             while self.verifications.front().is_some_and(|t| now.duration_since(*t) >= interval) {
                 self.verifications.pop_front();
             }
-            if self.verifications.len() >= self.rules.v_budget {
+            if self.verifications.len() >= self.effective_v_budget() {
                 self.budget_spent = true;
                 return Err(ChainError::VerifyBudget);
             }
             self.verifications.push_back(now);
         }
-        self.economy.tickets.verify(header, &game).map(|_| ()).map_err(|e| ChainError::Block(apply::BlockError::Sample(e.to_string())))
+        let cached = self.economy.tickets.is_cached(header);
+        let t0 = Instant::now();
+        let out = self.economy.tickets.verify(header, &game).map(|_| ()).map_err(|e| ChainError::Block(apply::BlockError::Sample(e.to_string())));
+        if !cached {
+            // the measured recomputation feeds the budget (R18-4): an EMA with
+            // weight 1/8 on the latest, so a slow node spends fewer slots and a
+            // fast one more, floor 1 either way
+            let ms = (t0.elapsed().as_millis() as u64).max(1);
+            self.verify_ema_ms = (self.verify_ema_ms * 7 + ms) / 8;
+        }
+        out
     }
 
     /// Steps 7–8 for a block whose parent is the main tip, with the
@@ -630,6 +715,7 @@ impl Chain {
 
     pub(super) fn invalidate(&mut self, id: BlockId) {
         let _ = self.store.set_status(&id, store::Status::Invalid);
+        self.arrivals.remove(&id);
         self.remember_rejected(id);
     }
 
@@ -803,6 +889,7 @@ impl Chain {
         };
         self.store.put_undo(&id, &undo).map_err(ChainError::Store)?;
         self.store.set_status(&id, store::Status::Valid).map_err(ChainError::Store)?;
+        self.arrivals.remove(&id);
         self.store.push_main(id).map_err(ChainError::Store)?;
         self.push_coinbase(header.height, txs);
         Ok(())

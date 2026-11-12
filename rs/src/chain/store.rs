@@ -166,6 +166,21 @@ impl Store {
         self.undo.get(id).ok().flatten().and_then(|v| Undo::decode(&v))
     }
 
+    /// Forget an entry that never reached the main chain: its header, body
+    /// and index row are removed, so the store can evict unverified headers
+    /// (R18-15). Refuses a main-chain or applied (`Valid`) entry.
+    pub fn forget(&mut self, id: &BlockId) -> Result<(), String> {
+        match self.index.get(id) {
+            None => return Ok(()),
+            Some(e) if e.status == Status::Valid || self.on_main(id) => return Err("cannot forget an applied or main-chain block".into()),
+            Some(_) => {}
+        }
+        self.headers.remove(*id).map_err(err)?;
+        self.bodies.remove(*id).map_err(err)?;
+        self.index.remove(id);
+        Ok(())
+    }
+
     /// Main-chain id at `height`.
     pub fn main_at(&self, height: u64) -> Option<BlockId> {
         self.chain.get(height as usize).copied()
