@@ -214,3 +214,28 @@ Every id of cybernode#18's review (R18-1…R18-12) disposed on `feat/ticket-pow`
 6. Question 9: §7 names `a^exact` the "four-node path gradient of epoch §4"
    (reading A); the exact-gradient source is the consensus epoch engine. The
    task page no longer claims §15 changes this.
+
+## P15b · review round 2 disposition (2026-11-12)
+
+- R18-15 (blocking) — fixed: the unverified set above the tip is no longer
+  refused at `UNVERIFIED_CAP` but evicted — lowest chainwork first, among
+  equals a header without a body before one with, then the oldest; a header
+  without a body for longer than one interval is evicted on its own
+  (`Store::forget`, `Chain::evict_unverified`). The flood test now sends
+  2 × cap + 16 forgeries: the store holds exactly the cap and the honest
+  block is admitted (an eviction makes room) and served.
+- R18-14 (blocking) — fixed: "catching up" is decided by verified chainwork
+  only — `Chain::behind_verified()`, an applied (`Valid`) header more than
+  D above the tip — never by unverified headers; the sync pass switches the
+  budget off on that predicate alone. Tested: after the flood,
+  `behind_verified()` is false and the budget stays on.
+- R18-16 — added `settlement_pays_by_the_sampled_mean_at_k_min`: two players
+  on the sink edge, 4·K_MIN single-marginal tickets, both reach K_MIN, `a(c)`
+  is the mean (not the exact gradient), the mean matches `Game::shapley`,
+  Σ â ≤ v(N) with the dust the pool's.
+- R18-4 — fixed: `V_BUDGET` follows the node's measured verification time —
+  an EMA (weight 1/8) of its last full recomputations, seeded from the
+  chain's nominal budget, `⌊0.5·T / t_verify⌋`, floor 1
+  (`Chain::effective_v_budget`); the receipt's 8 s is a measurement, not a
+  limit.
+- R18-13 — wording for tru#45, relayed by the coordinator.

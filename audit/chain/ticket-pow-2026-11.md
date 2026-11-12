@@ -94,10 +94,12 @@ minute and then tracked node-b within two blocks. This is the fix of R18-2:
 
 ## R18-4 note
 
-Sample verification still runs under the chain mutex; one recompute (~8 s on
-a shared build-a core at pussy's size) holds it. The budget (6/interval) and
-the unverified store cap (`UNVERIFIED_CAP = 512`) bound the exposure; moving
-the solve to `spawn_blocking` (verify, then lock to apply) is the follow-up.
+Sample verification runs under the chain mutex; one recompute (~8 s on a
+shared build-a core at pussy's size) holds it. Since round 2 the budget
+follows the node's own measured recomputation time (an EMA, floor 1), so a
+slow node spends fewer slots per interval and a fast one more; the unverified
+store is capped and evicted (`UNVERIFIED_CAP = 512`, round 2). Moving the solve
+to `spawn_blocking` (verify, then lock to apply) stays the follow-up.
 
 ## forged-header flood
 
