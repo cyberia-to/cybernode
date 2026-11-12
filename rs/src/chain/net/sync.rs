@@ -87,14 +87,14 @@ async fn pass(inner: &Arc<Inner>, preferred: Option<EndpointId>, refresh: bool) 
             break;
         }
     }
-    // off the budget only while the node is behind a chain it has verified
-    // by more than D (R18-2, R18-14): decided by applied headers, never by
-    // unverified ones, so a few cheap forged headers cannot switch it off
-    inner.chain.set_verify_budget(!inner.chain.behind_verified());
+    // off the budget only while catching up (R18-2, R18-14): the next block is
+    // more than D below the best PoW-valid header chain — a flood at the tip
+    // cannot forge such a chain without D × target hashes
+    inner.chain.set_verify_budget(!inner.chain.catching_up());
     body_sync(inner).await;
     let tip = inner.chain.tip();
     let best = inner.chain.best_header();
-    inner.chain.set_verify_budget(!inner.chain.behind_verified());
+    inner.chain.set_verify_budget(!inner.chain.catching_up());
     inner.catching_up.store(best.height > tip.height + 2, Ordering::Relaxed);
 }
 

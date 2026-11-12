@@ -476,10 +476,10 @@ impl Chain {
         self.v_budget_pinned = Some(b.max(1));
     }
 
-    /// Is the budget decided by verified chainwork saying the node is behind?
+    /// Is the node catching up at `height` (the PoW-valid chain's length)?
     #[cfg(test)]
-    pub(crate) fn behind_verified_for_test(&self) -> bool {
-        self.behind_verified()
+    pub(crate) fn catching_up_for_test(&self, height: u64) -> bool {
+        self.catching_up(height)
     }
 
     /// Verifications spent in the open window, and the unverified set above
@@ -549,13 +549,27 @@ impl Chain {
         }
     }
 
-    /// Is this node behind a chain it has *verified* by more than D blocks
-    /// (R18-14)? Only an applied (`Valid`) header above the tip counts —
-    /// never an unverified header, however much work its id claims, so a
-    /// handful of cheap forged headers cannot switch the budget off.
-    pub(super) fn behind_verified(&self) -> bool {
-        let tip_h = self.store.tip_height();
-        self.store.iter().any(|(_, e)| e.status == store::Status::Valid && e.header.height > tip_h + FINALITY_DEPTH)
+    /// The height of the best header this node holds whose PoW id passed the
+    /// target and which is backed by a contiguous chain of PoW-valid headers
+    /// from the tip (chain-wire §3.1 header-first sync's own check: the store
+    /// admits a header only after steps 1–5 with its parent known).
+    pub(super) fn best_pow_height(&self) -> u64 {
+        self.store.iter().filter(|(_, e)| e.status != store::Status::Invalid).map(|(_, e)| e.header.height).max().unwrap_or(0)
+    }
+
+    /// Is the node catching up at `height` (R18-14; tru#45 020c020, §7's
+    /// scope sentence)? Yes when the block being verified is more than D
+    /// below the best PoW-valid header it has received — decided by the
+    /// PoW-valid header chain's length, never by applied state (an applied
+    /// header above the tip does not exist while syncing). The bound: a
+    /// forged body-less flood above the tip cannot make a contiguous
+    /// PoW-valid chain longer than D without paying `D × 2^256/target`
+    /// hashes, one target-passing header per height, so a flood at the tip
+    /// never switches the budget off, and blocks more than D below the best
+    /// header (replay, initial download, bodies of a long chain) verify at
+    /// full speed.
+    pub(super) fn catching_up(&self, height: u64) -> bool {
+        self.best_pow_height() > height + FINALITY_DEPTH
     }
 
     /// The budget in force: the pinned one (tests) or `⌊0.5·T / t_verify⌋`
@@ -609,7 +623,9 @@ impl Chain {
             return Err(ChainError::Block(apply::BlockError::Sample("the sample is zero".into())));
         }
         let game = self.game_for(&header.prev, header.height)?;
-        if self.budget_on && !self.economy.tickets.is_cached(header) {
+        // the budget is for competing tips: a block more than D below the best
+        // PoW-valid header is catch-up and verifies at full speed (R18-14)
+        if self.budget_on && !self.catching_up(header.height) && !self.economy.tickets.is_cached(header) {
             let now = Instant::now();
             let interval = Duration::from_secs(BLOCK_TIME as u64);
             while self.verifications.front().is_some_and(|t| now.duration_since(*t) >= interval) {

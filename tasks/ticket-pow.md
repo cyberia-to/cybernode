@@ -224,11 +224,18 @@ Every id of cybernode#18's review (R18-1…R18-12) disposed on `feat/ticket-pow`
   (`Store::forget`, `Chain::evict_unverified`). The flood test now sends
   2 × cap + 16 forgeries: the store holds exactly the cap and the honest
   block is admitted (an eviction makes room) and served.
-- R18-14 (blocking) — fixed: "catching up" is decided by verified chainwork
-  only — `Chain::behind_verified()`, an applied (`Valid`) header more than
-  D above the tip — never by unverified headers; the sync pass switches the
-  budget off on that predicate alone. Tested: after the flood,
-  `behind_verified()` is false and the budget stays on.
+- R18-14 (blocking) — fixed (second cut, after the round-2 re-check at
+  4fd067b: a `Valid` header above the tip never exists while syncing, so the
+  first cut never fired): "catching up" = the block being verified is more
+  than D below the best PoW-valid header the node holds, backed by a
+  contiguous PoW-valid header chain from the tip (chain-wire §3.1; tru#45
+  020c020, §7's scope sentence) — `Chain::catching_up(height)`, decided by
+  the PoW-valid chain's length, never by applied state. The bound: a
+  body-less flood above the tip cannot make such a chain longer than D
+  without `D × 2^256/target` hashes. Tested: `initial_sync_verifies_at_full_
+  speed_beyond_d` (a fresh node joins a 2·D+50 chain with a budget of one and
+  applies every block beyond D without a slot) and the flood test asserts the
+  budget stays on at the tip.
 - R18-16 — added `settlement_pays_by_the_sampled_mean_at_k_min`: two players
   on the sink edge, 4·K_MIN single-marginal tickets, both reach K_MIN, `a(c)`
   is the mean (not the exact gradient), the mean matches `Game::shapley`,

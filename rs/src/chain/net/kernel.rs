@@ -615,8 +615,10 @@ impl ChainView for KernelChain {
     fn set_verify_budget(&self, on: bool) {
         self.lock().chain.set_budget_on(on);
     }
-    fn behind_verified(&self) -> bool {
-        self.lock().chain.behind_verified()
+    fn catching_up(&self) -> bool {
+        let inner = self.lock();
+        let next = inner.chain.tip().header.height + 1;
+        inner.chain.catching_up(next)
     }
     fn retry_waiting(&self) {
         let mut inner = self.lock();
