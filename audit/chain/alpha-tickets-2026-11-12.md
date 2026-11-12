@@ -36,6 +36,13 @@ result (§ the 24 h) is appended from the watcher's file by whoever closes the r
   A release binary for a 2.35 host needs the train's ubuntu-22.04 leg or a 2.35 build root on
   build-a (apparatus `servers/build-a/README.md` names that step); build-a has no container
   runtime. Not hidden, not fixed by hand.
+  Fixed 17:03 UTC the same day: the same sources rebuilt on build-a in a plain Ubuntu 22.04
+  chroot (glibc 2.35, rustc 1.95.0, GNU ld; apparatus `servers/build-a/jammy.sh`, the train's
+  x86_64 environment) — `objdump -T` and the gate's own parser read highest `GLIBC_2.34`,
+  floor 2.35 holds; 29,381,064 bytes, sha256
+  `c528ea604d4b39057686748c2fa366f064cad53e8966e129db938b0887c157cd`; facade tests 2 passed,
+  0 failed; placed beside the others as `bin/soft3-8dd579b-floor` on edge-b and agent-a for the
+  next restart, the alpha not restarted (`bin/soft3 → soft3-8dd579b` stays for the 24 h).
 - the economy's engine id in `/economy` reads `tru-epoch-e660d1e`: a constant string in
   `rs/src/chain/economy/focus.rs`, not the built tru revision (3cd4e45).
 
