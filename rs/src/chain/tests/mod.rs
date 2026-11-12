@@ -71,6 +71,15 @@ impl Net {
     }
 
     fn with_funds_named(accounts: u8, funds: u64, name: &str) -> Net {
+        Net::with_funds_links(accounts, funds, name, &[([1; 32], [2; 32])])
+    }
+
+    /// As [`Net::with_funds_named`] with a chosen genesis edge set (author
+    /// `neurons[0]`) — the base graph the economy settles over. A chain
+    /// a → b → c (particles 1, 2, 3) gives a high-φ* sink (3) a lock can
+    /// concentrate onto, so an epoch's `v(N) > 0` (rewards.md §7 step 4); the
+    /// default is one edge 1 → 2.
+    pub fn with_funds_links(accounts: u8, funds: u64, name: &str, edges: &[(Id, Id)]) -> Net {
         test_pow::relax();
         let keys: Vec<_> = (0..accounts).map(key).collect();
         let neurons: Vec<Id> = keys.iter().map(|k| neuron_of(&pubkey(k))).collect();
@@ -96,7 +105,7 @@ impl Net {
                 pool: super::pool::Pool::genesis(),
             },
             balances,
-            links: vec![Link { neuron: neurons[0], p: [1; 32], q: [2; 32], height: 7 }],
+            links: edges.iter().map(|(p, q)| Link { neuron: neurons[0], p: *p, q: *q, height: 7 }).collect(),
         };
         Net {
             genesis: Genesis::from_file(&file).unwrap(),

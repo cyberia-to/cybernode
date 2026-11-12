@@ -209,15 +209,13 @@ fn the_new_high_rule_pays_only_above_the_decayed_mark() {
     assert!(r.marks.is_empty());
 }
 
-/// Ignored at the §7 payout cut (P15b question 9, tasks/ticket-pow.md):
-/// these single-player cases are built on the `Reference` engine, whose
-/// gradient sign is the exact-gradient `a(c)`, but the rescale factor is
-/// `v(N)` from tru's game engine; the two engines disagree on the sign of a
-/// toy graph's syntropy change, so a case the reference calls "earns" the
-/// game calls `v(N) ≤ 0` and pays nothing. The test is rebuilt on one
-/// engine once §15 fixes the exact-gradient source.
+/// On tru's epoch engine — the one the node settles with and the one the
+/// game's `v(N)` is read on — under the payout rule of rewards.md §7 step 4
+/// (tru#45 final, 2026-11-12): a player under `K_MIN` is paid its exact
+/// path gradient, clipped, rescaled to `v(N)` only when `Σa⁺ > 0` and
+/// `v(N) > 0`, else nothing is paid. The cases that earn are the ones that
+/// concentrate focus on the sink `cc`, the graph's high-φ* particle.
 #[test]
-#[ignore = "P15b question 9: a(c) and v(N) must come from one engine"]
 fn attribution_is_linear_in_stake_and_valence_cancels() {
     use super::settle::{Position, Snapshot, compute};
     use super::weights::GenesisWeights;
@@ -232,10 +230,18 @@ fn attribution_is_linear_in_stake_and_valence_cancels() {
         let active = positions.iter().filter(|p| p.valence != 0).map(|p| p.stake).sum();
         Snapshot { epoch, height: epoch * 10, block_id: [epoch as u8; 32], state_root: [0; 32], positions, marks: Default::default(), active, supply: 1_000_000 }
     };
-    let e = Reference::default();
-    // one author with 100, or two with 60 and 40: the same total weight (Sybil-neutral)
+    use super::focus::Tru;
+    let e = Tru::new(1);
+    // one author with 100, or two with 60 and 40, into the sink: the same
+    // total weight (Sybil-neutral), and the epoch creates value
     let one = compute(&snap(1, vec![]), &snap(2, vec![pos(7, 100, 1)]), &weights, &e, None, &lottery(&snap(1, vec![]), &snap(2, vec![pos(7, 100, 1)]), &weights));
     let two = compute(&snap(1, vec![]), &snap(2, vec![pos(7, 60, 1), pos(8, 40, 1)]), &weights, &e, None, &lottery(&snap(1, vec![]), &snap(2, vec![pos(7, 60, 1), pos(8, 40, 1)]), &weights));
+    assert!(one.value > 0, "+1 into the sink raises syntropy over U: v(N) = {}", one.value);
+    assert_eq!(one.earners.len(), 1, "estimates {:?}", one.lottery);
+    assert_eq!(two.earners.len(), 2, "estimates {:?}", two.lottery);
+    assert_eq!(one.lottery[0].k, 0, "no ticket in the window: paid by the exact gradient");
+    assert_eq!(one.lottery[0].a, one.lottery[0].exact);
+    assert!(one.lottery[0].paid > 0 && one.lottery[0].paid <= one.value, "â ≤ v(N)");
     let sum_two = two.earners.iter().fold(W::ZERO, |acc, x| acc.checked_add(&x.x).unwrap());
     let one_x = one.earners[0].x;
     let (hi, lo) = if one_x > sum_two { (one_x, sum_two) } else { (sum_two, one_x) };
@@ -247,18 +253,22 @@ fn attribution_is_linear_in_stake_and_valence_cancels() {
     // −1 on an axon with no weight does nothing: A is clipped at zero
     let against = compute(&snap(1, vec![]), &snap(2, vec![pos_on(7, cc, a, 100, -1)]), &weights, &e, None, &lottery(&snap(1, vec![]), &snap(2, vec![pos_on(7, cc, a, 100, -1)]), &weights));
     assert!(against.earners.is_empty(), "nothing to subtract from: zero gradient");
-    // −1 against a → b (whose weight spreads focus, ∂J/∂A < 0) earns
+    // −1 against a → b and +1 on it move the epoch's value in opposite
+    // directions; a position earns iff its exact gradient is positive and
+    // the epoch created value (v(N) > 0) — one rule on one engine
     let minus = compute(&snap(1, vec![]), &snap(2, vec![pos_on(7, a, b, 100, -1)]), &weights, &e, None, &lottery(&snap(1, vec![]), &snap(2, vec![pos_on(7, a, b, 100, -1)]), &weights));
-    assert_eq!(minus.earners.len(), 1, "subtracting a spreading edge raises syntropy: v(N) = {}, estimates {:?}", minus.value, minus.lottery);
-    // +1 on the same edge earns nothing: its gradient is negative
     let plus = compute(&snap(1, vec![]), &snap(2, vec![pos_on(7, a, b, 100, 1)]), &weights, &e, None, &lottery(&snap(1, vec![]), &snap(2, vec![pos_on(7, a, b, 100, 1)]), &weights));
-    assert!(plus.earners.is_empty());
-    // +1 and −1 of equal size on one axon (§9 hedging): A is unchanged, the
-    // attributions are opposite; only the side whose a(c) > 0 earns, so the
-    // pair costs twice the capital for one side's credit
+    assert!(minus.value.signum() != plus.value.signum() || minus.value == 0, "v(N): −1 {} vs +1 {}", minus.value, plus.value);
+    for (r, name) in [(&minus, "−1 on a → b"), (&plus, "+1 on a → b")] {
+        let earns = r.value > 0 && r.lottery[0].exact > 0;
+        assert_eq!(r.earners.len(), usize::from(earns), "{name}: v(N) = {}, estimates {:?}", r.value, r.lottery);
+    }
+    // +1 and −1 of equal size on one axon (§9 hedging): A is unchanged, so
+    // v(N) = 0 and nothing is paid — the pair costs twice the capital for
+    // no credit (rewards.md §7: nothing is paid when v(N) ≤ 0)
     let hedge = compute(&snap(1, vec![]), &snap(2, vec![pos(7, 100, 1), pos(8, 100, -1)]), &weights, &e, None, &lottery(&snap(1, vec![]), &snap(2, vec![pos(7, 100, 1), pos(8, 100, -1)]), &weights));
-    assert_eq!(hedge.earners.len(), 1, "{:?}", hedge.earners);
-    assert_eq!(hedge.earners[0].card, card_id(&[7; 32], &b, &cc));
+    assert_eq!(hedge.value, 0, "A is unchanged");
+    assert!(hedge.earners.is_empty(), "{:?}", hedge.earners);
 }
 
 
