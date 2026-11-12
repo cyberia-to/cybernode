@@ -457,6 +457,27 @@ impl Chain {
         self.budget_on = on;
     }
 
+    /// Set `V_BUDGET` (tests: the flood conformance test pins a small one).
+    #[cfg(test)]
+    pub(crate) fn set_v_budget(&mut self, b: usize) {
+        self.rules.v_budget = b;
+    }
+
+    /// Verifications spent in the open window, and the unverified set above
+    /// the tip (tests: the flood conformance test).
+    #[cfg(test)]
+    pub(crate) fn flood_state(&self) -> (usize, usize) {
+        (self.verifications.len(), self.unverified_above_tip())
+    }
+
+    /// Open a fresh verification window (tests: the flood conformance test
+    /// renews the budget the next interval would).
+    #[cfg(test)]
+    pub(crate) fn renew_verify_budget(&mut self) {
+        self.verifications.clear();
+        self.budget_spent = false;
+    }
+
     /// Headers heavier than the tip whose sample this node has not verified
     /// (`Status::Header` or `Status::Body`, not on the main chain): the set
     /// `UNVERIFIED_CAP` bounds against a forged-header flood (R18-5).
