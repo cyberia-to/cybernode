@@ -8,7 +8,7 @@ crystal-domain: cyber
 
 rung 7 of [[soft3]]: one binary that runs any compatible network instance as data, and owns everything networked — the phase-1 root chain kernel, the wire and sync, routing, mining, the genesis pipeline, the wallet, the HTTP surface. its planes stay where [[network-planes]] put them: [[radio]] reaches, sync reconciles, [[foculus]] agrees, solong rewards. **cybernode.ai is the reference instance**, operated by cyberia; an instance is cybernode plus a manifest.
 
-decided and executed from [[soft3/proposals/cybernode|the cybernode proposal]] (the owner, 2026-10-17 and 2026-10-27). the code moved here from the `soft3` crate with its history on 2026-10-27, unchanged: the wire identifiers (`soft3/chain/…/v1`), the genesis files and the home directories keep their names, so every running node and every genesis hash stays valid. what changed is the crate, the binary and the unit names.
+decided and executed from [[soft3/projects/cybernode|the cybernode proposal]] (the owner, 2026-10-17 and 2026-10-27). the code moved here from the `soft3` crate with its history on 2026-10-27, unchanged: the wire identifiers (`soft3/chain/…/v1`), the genesis files and the home directories keep their names, so every running node and every genesis hash stays valid. what changed is the crate, the binary and the unit names.
 
 | here | holds |
 |---|---|
