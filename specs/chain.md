@@ -868,7 +868,7 @@ has the slot). Nothing in phase 1 depends on it; a node without the proof
 verifier runs identically.
 
 This section is superseded as the target by
-[the proven present](../proposals/proven-present.md): every block is a proven
+[the proven present](../projects/proven-present.md): every block is a proven
 transition whose proof verifies its parents' proofs, proved first and mined
 second; the canary blocks of rule set 1 are proven after the fact, and a rule
 set before `CHECKPOINT_SUNSET` makes the block proof a validity condition. Its
@@ -1017,12 +1017,12 @@ kernel's `TxError::Box` goes.
 ## 11. the pool (rule set 2, formats frozen at genesis)
 
 The pool is the shielded money of
-[privacy, frozen](../proposals/privacy-frozen.md): one tree of hemera
+[privacy, frozen](../projects/privacy-frozen.md): one tree of hemera
 commitments, spends proven in zero knowledge by a hash-only zheng proof,
 cyberlinks as public outputs of spends, one folded proof per block. It is
 off at launch: rule set 1 knows none of its transaction kinds, and the
 chain is public until rule set 2 activates; privacy is not retroactive
-(proposal §1.13). What is on board at genesis is the material and the
+(project §1.13). What is on board at genesis is the material and the
 formats of this section. The genesis `p` frame ends with the pool record
 of §11.9, so the chain id commits to every constant below; the activation
 of rule set 2 adds verifying keys (§11.10) and changes nothing written here.
@@ -1044,7 +1044,7 @@ nullifier, predicate binding, tree node, spend id, statement id, verifying
 key set, tags — is wide: 64 bytes, eight Goldilocks elements. A 32-byte
 hemera digest has about 85 bits of generic quantum collision resistance
 (Brassard–Høyer–Tapp, `2^(n/3)`); eight elements give about 170, above the
-128 the proposal requires (§1.3: at least 48 bytes), and a format frozen at
+128 the project requires (§1.3: at least 48 bytes), and a format frozen at
 genesis can never be widened. The 32-byte particle stays a locator — token
 ids, data, link endpoints, the chain id, transparent card ids — never an
 authority over value or program.
@@ -1147,7 +1147,7 @@ digest).
 
 The nullifier set is lifetime: every nullifier ever revealed stays in it,
 and it is never reset, pruned by epoch or rebuilt from a live window (an
-epoch reset accepts an already spent nullifier; proposal §1.10). A node
+epoch reset accepts an already spent nullifier; project §1.10). A node
 may compact its storage only where an authenticated proof of
 non-membership over the whole history still rejects every old nullifier.
 A spend is invalid if any of its nullifiers is in the set or appears twice
@@ -1212,7 +1212,7 @@ Canonical form, checked by every decoder:
   outputs in order; zero bytes means none;
 - note `i` belongs to output `i`; every note has `len ≤ 2,048`; notes are
   opaque to consensus (an ML-KEM-1024 envelope bound to its output
-  commitment, by wallet convention, proposal §1.2);
+  commitment, by wallet convention, project §1.2);
 - every limb canonical (§11.1); no trailing bytes. The longest canonical
   encoding is 9,981 bytes.
 
@@ -1358,7 +1358,7 @@ and header.
   `E_40`; the nullifier set is empty. Nothing in rule set 1 reads or
   writes pool state, and everything it records is public forever.
 - Rule set 2 (the pool) activates by the activation table (§7.1) when the
-  gates of the proposal pass; the privacy promise holds from its
+  gates of the project pass; the privacy promise holds from its
   activation height. Its activation entry carries the verifying key set
   of `SPEND` and of the block proof — and nothing else of this section: no
   format, tag, width, depth, window or accounting rule changes with it. A
