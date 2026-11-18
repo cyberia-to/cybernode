@@ -903,7 +903,7 @@ fn cmd_conformance(args: &[String]) {
         std::process::exit(2);
     }
     let value = |flag: &str| -> Option<String> { args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned() };
-    let snap = value("--snap").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../conformance/chain.snap")));
+    let snap = value("--snap").map(PathBuf::from).unwrap_or_else(conformance::chain_snap_path);
     let genesis = value("--genesis").map(PathBuf::from).unwrap_or_else(|| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         PathBuf::from(home).join(".cache/cyber/genesis/pussy.tade")

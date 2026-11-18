@@ -86,7 +86,7 @@ fn spawn_node(label: &str) -> (NodeProc, Vec<u8>) {
     let home = std::env::temp_dir().join(format!("chain-adversary-{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).unwrap();
-    let bin = env!("CARGO_BIN_EXE_soft3");
+    let bin = env!("CARGO_BIN_EXE_cybernode");
     let genesis_path = home.join("genesis.tade");
     let made = Command::new(bin).args(["chain", "genesis-dev", "--name", "dev", "--fund", &format!("{MINER}=1000000000"), "--out"]).arg(&genesis_path).output().unwrap();
     assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
