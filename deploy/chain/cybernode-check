@@ -102,8 +102,8 @@ else
 fi
 peers="$etc_dir/$chain.peers.toml"
 if [[ -r "$peers" ]]; then
-  # Both launchers always pass --peers, and the node reads it at startup (crate/src/node/chain_node.rs),
-  # so a missing file stops the node (DOWN below). Mirrors parse_peers (crate/src/chain/net/discovery.rs);
+  # Both launchers always pass --peers, and the node reads it at startup (rs/src/node/chain_node.rs),
+  # so a missing file stops the node (DOWN below). Mirrors parse_peers (rs/src/chain/net/discovery.rs);
   # Primary path: ONE python3 program (tomllib, Python >= 3.11) does the whole job like the node: the file must be
   # valid TOML 1.0 (the toml crate; multi-line arrays, inline tables, literal strings, dotted keys all work), then the
   # serde types of PeersFile/PeerEntry (version u32, chain str, peer array of tables, id required, name/id/relay str,
