@@ -121,6 +121,19 @@ if [[ -r "$peers" ]]; then
   # (DEGRADED here, so operators see it). SocketAddr is approximated: IPv4 a.b.c.d:port exactly
   # (octets 0-255, no leading zeros); IPv6 [..]:port or [..%digits]:port when the brackets hold only
   # hex digits, ':' and '.' with at least one ':'; port 0-65535. Hostnames never parse.
+  # The ed25519 point check is one python program, prepended to both paths below: the tomllib
+  # program calls ispoint(), and so does the helper the awk fallback pipes its ids through.
+  point_py=
+  IFS= read -r -d '' point_py <<'PYEOF' || true
+P = 2**255 - 19
+D = -121665 * pow(121666, P - 2, P) % P
+
+def ispoint(h):
+    y = (int.from_bytes(bytes.fromhex(h), "little") & (2**255 - 1)) % P
+    u = (y * y - 1) % P
+    v = (D * y * y + 1) % P
+    return not (u and (not v or pow(u * pow(v, P - 2, P) % P, (P - 1) // 2, P) != 1))
+PYEOF
   peers_py=
   IFS= read -r -d '' peers_py <<'PYEOF' || true
 import re, sys, tomllib
@@ -196,16 +209,6 @@ def okaddr(a):
         return False
     return okport(a[i + 1:]) and okv4(a[:i])
 
-# ed25519 point check (EndpointId::from_bytes: ZIP-215 decompress, see the shell comment)
-P = 2**255 - 19
-D = -121665 * pow(121666, P - 2, P) % P
-
-def ispoint(h):
-    y = (int.from_bytes(bytes.fromhex(h), "little") & (2**255 - 1)) % P
-    u = (y * y - 1) % P
-    v = (D * y * y + 1) % P
-    return not (u and (not v or pow(u * pow(v, P - 2, P) % P, (P - 1) // 2, P) != 1))
-
 skipped, dropped, usable = [], [], 0
 for p in peers:
     nm, pid = p.get("name", ""), p["id"]
@@ -237,7 +240,7 @@ out("OK", "%d bootstrap peers in %s" % (usable, path))
 PYEOF
   peers_done=0
   if python3 -I -c 'import tomllib' >/dev/null 2>&1; then
-    peers_out=$(python3 -I -c "$peers_py" "$peers" "$chain" 2>/dev/null)
+    peers_out=$(python3 -I -c "$point_py$peers_py" "$peers" "$chain" 2>/dev/null)
     if [[ -n "$peers_out" ]]; then
       IFS=$'\t' read -r peers_level peers_msg <<< "$peers_out"
       say "$peers_level" peers "$peers_msg"
@@ -305,20 +308,14 @@ PYEOF
   p_nopoint=""; p_nopy=0
   if [[ -n "$p_ids" && -z "$p_ver$p_chain$p_missid$p_bad" ]]; then
     if command -v python3 >/dev/null 2>&1; then
-      p_nopoint=$(printf '%s\n' "$p_ids" | python3 -I -c '
+      p_nopoint=$(printf '%s\n' "$p_ids" | python3 -I -c "$point_py"'
 import sys
-P = 2**255 - 19
-D = -121665 * pow(121666, P - 2, P) % P
 for line in sys.stdin:
     line = line.rstrip("\n")
     if not line:
         continue
     pid, name = (line.split("\t", 1) + [""])[:2]
-    h = pid[2:] if pid[:2] == "0x" else pid
-    y = (int.from_bytes(bytes.fromhex(h), "little") & (2**255 - 1)) % P
-    u = (y * y - 1) % P
-    v = (D * y * y + 1) % P
-    if u and (not v or pow(u * pow(v, P - 2, P) % P, (P - 1) // 2, P) != 1):
+    if not ispoint(pid[2:] if pid[:2] == "0x" else pid):
         print(name)
         sys.exit(1)
 ' 2>/dev/null); rc=$?
