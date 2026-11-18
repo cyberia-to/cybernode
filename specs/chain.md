@@ -259,8 +259,8 @@ body = count: u32 LE ‖ tx[0] ‖ tx[1] ‖ … ‖ tx[count−1]
 - `168 + len(body) ≤ MAX_BLOCK_BYTES`;
 - each `tx` is self-delimiting (fixed size per kind, §2) and
   `len(tx) ≤ MAX_TX_BYTES`; a version-2 transaction (rule set `A`, §2.9)
-  is self-delimiting by its `auth_len` and bounded by `MAX_AUTH_BYTES`
-  instead;
+  is self-delimiting by its `auth_len`, and `auth_len ≤ MAX_AUTH_BYTES`
+  bounds it instead of `len(tx) ≤ MAX_TX_BYTES`;
 - the same txid never appears twice in a block.
 
 Rationale: 256 KiB and 1,024 txs is 40 tx/s sustained, three orders of
@@ -442,7 +442,7 @@ balance of `legacy_owner(hrp, account_id)` (all tokens) moves to
 
 Status: draft for the owner's verdict (plan row P5, decision D16: pussy "fully
 on proofs, without signatures"). Receipt:
-[soft3 audit/chain/proof-auth-2026-11.md](https://github.com/cyberia-to/soft3/blob/release/phase1/audit/chain/proof-auth-2026-11.md).
+[audit/chain/proof-auth-2026-11.md](../audit/chain/proof-auth-2026-11.md).
 `A` is a placeholder. It gets a number when its activation entry is written
 (§7.1: rule-set numbers rise with activation height). If the owner puts it
 at genesis, this section becomes part of rule set 1.
@@ -477,7 +477,8 @@ txid_v2        = hemera("soft3/chain/txid/v1\0" ‖ chain ‖ tx_core)
 - **Validity.** A version-2 transaction is valid when, in this order:
   - it decodes;
   - `auth_len ≤ MAX_AUTH_BYTES` and the envelope decodes canonically;
-  - the nonce (§2.5), fee (§2.6) and kind rules hold for `from`;
+  - the nonce (§2.5), fee (§2.6), balance (every debit ≥ 0 after, §3.4)
+    and kind rules hold for `from`;
   - the envelope verifies under the rule set's AUTH1 key, with public
     output `from` and context `auth_statement`.
 
@@ -487,8 +488,9 @@ txid_v2        = hemera("soft3/chain/txid/v1\0" ‖ chain ‖ tx_core)
 - **Identity space.** A version-2 `from` is a proof-native neuron id, and
   only a proof can move its balances. A legacy id `neuron_of(pubkey)` (§2.8)
   is the untagged hash of a public 33-byte key. A version-2 proof for it
-  would need a 32-byte `s` whose tagged hash equals it. That is a second
-  preimage of hemera, because the pubkey is already a known first preimage.
+  would need a 32-byte `s` with `auth_key(s)` equal to that id. That is a
+  preimage of `nox15` at a hemera output fixed in advance — `nox15` is not
+  hemera's byte sponge (below), so no first preimage of the id helps.
   So legacy accounts keep authorizing by NSIG1
   (version 1, §2.7). This follows mudra `specs/identity.md`: a
   secp256k1-derived id is never reinterpreted as a preimage identity.
@@ -505,10 +507,11 @@ txid_v2        = hemera("soft3/chain/txid/v1\0" ‖ chain ‖ tx_core)
   to the proof its miner checked.
 - **Fees and limits.** `fee ≥ len(tx_v2) · MIN_FEE_PER_BYTE` (§2.6),
   counting the proof's bytes. A version-2 transaction is bounded by
-  `MAX_AUTH_BYTES` for its `auth`, not by `MAX_TX_BYTES`. `MAX_BLOCK_BYTES`
-  is unchanged. AUTH1 as written measures envelope medians of
-  129,971–130,675 B, and the largest seen is 131,251 B (receipt §7). A
-  version-2 transfer is 2 + 120 + 4 + envelope bytes, ~130,800 B. That is
+  `auth_len ≤ MAX_AUTH_BYTES`, not by `len(tx) ≤ MAX_TX_BYTES` (§1.6).
+  `MAX_BLOCK_BYTES` is unchanged. AUTH1 as written measures envelope
+  medians of 129,971–130,675 B, and the largest seen is 131,251 B
+  (receipt §7). A version-2 transfer is 2 + 120 + 4 + envelope bytes,
+  ~130,800 B. That is
   **1 per block guaranteed, 2 when both envelopes are ≤ 130,819 B**, or
   0.033–0.067 tx/s at T = 30 s, against ~34 tx/s for version 1.
   `MAX_AUTH_BYTES` is 196,608, 50 % over the largest envelope seen,
@@ -518,6 +521,18 @@ txid_v2        = hemera("soft3/chain/txid/v1\0" ‖ chain ‖ tx_core)
   block over every authorization, where the proofs leave the block as kind
   5's already do (§11.7). That is the block relation (proven-present S1,
   plan row P8), a later rule set, and not measured yet.
+- **What the wire must change.** [chain-wire](chain-wire.md) carries no such
+  transaction today: §2 bounds the `txs` gossip payload at 512 B and sets the
+  iroh-gossip `max_message_size` to 4,096 on every topic, and §4 admits to the
+  mempool only at `size ≤ 512`. Rule set `A` therefore needs three
+  chain-wire changes, all raised to the largest version-2 transaction
+  (`MAX_AUTH_BYTES` plus its version, kind, body and `auth_len` bytes): the
+  `txs` payload bound, the gossip message size — where a frame that large is
+  a transport question of its own, not one `max_message_size` answers — and
+  the mempool admission bound. Until they are written, a version-2
+  transaction reaches a block only through the miner that builds it, and
+  nothing relays or mempools it. The wire change belongs with the activation
+  entry (§10 row 13) and is not written here.
 - **The hash of the key.** `nox15` is nox pattern 15, the only hash a
   zheng proof of a nox program can contain. It is the noun's structural
   digest (each atom `hash_leaf` of its 8 LE bytes, each pair `hash_node`
@@ -617,7 +632,7 @@ S' = S
 apply coinbase: balances[H(to ‖ τ)] += amount ; balances[focus_key(τ)] += cut(h) ; coins[τ].total_supply += SUBSIDY
 if h == settle(E): settle epoch E (chain-economy §5)
 for tx in body[1..]:
-    check nonce, signature, balances (every debit ≥ 0 after), kind rules
+    check nonce, authorization (NSIG1 in version 1, the AUTH1 proof in version 2 §2.9), balances (every debit ≥ 0 after), kind rules
     apply; neurons[from].nonce += 1
 assert state_root(B) == root(S')
 ```
@@ -1131,7 +1146,7 @@ kernel's `TxError::Box` goes.
 | 10 | `NeuronRecord.nonce` in bbg vs chain-side nonce table outside the root | in bbg, under the root | in bbg, kept |
 | 11 | multisig / non-secp256k1 legacy accounts | dormant; a later rule set adds their claim | dormant, kept |
 | 12 | the particle definition (row 19) | `hemera(bytes)`, 32 bytes, as every crate computes today | `hemera(bytes)`, kept |
-| 13 | proof-authorized transactions (§2.9): when rule set `A` activates (at genesis, which means pussy waits for the remeasured relation and its verifying key; or by a scheduled fork after genesis), and whether `MAX_BLOCK_BYTES` rises for it (1–2 version-2 transfers per 256 KiB block as measured, receipt §7) | by scheduled fork after genesis; `MAX_BLOCK_BYTES` unchanged; per-block aggregation (P8) is the later fix for throughput | open (D16 (4)) |
+| 13 | proof-authorized transactions (§2.9): when rule set `A` activates (at genesis, which means pussy waits for the remeasured relation and its verifying key; or by a scheduled fork after genesis), and whether `MAX_BLOCK_BYTES` rises for it (1–2 version-2 transfers per 256 KiB block as measured, receipt §7); the chain-wire bounds it requires are named in §2.9 and not written | by scheduled fork after genesis; `MAX_BLOCK_BYTES` unchanged; per-block aggregation (P8) is the later fix for throughput; the chain-wire change lands with the activation entry | open (D16 (4)) |
 | 14 | NSIG1 after rule set `A`: kept for every kind, kept only for the move to a proof-native neuron, or retired at a height | kept for every kind in `A`; retiring it is a later rule set | open |
 
 ## 11. the pool (rule set 2, formats frozen at genesis)
