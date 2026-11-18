@@ -1,7 +1,7 @@
 //! cybernode — rung 7 of the soft3 ladder: the node. moved from the `soft3` crate on 2026-10-27 (soft3/proposals/cybernode.md); the code is unchanged, the wire identifiers (`soft3/chain/…/v1`) and the home directories keep their names.
 //!
 //! - [[network]] — spacepussy-test product network (soft3 chaosnet)
-//! - [[node]] — real soft3-node over cybergraph + bbg
+//! - [[node]] — the node itself over cybergraph + bbg
 //! - [[genesis]] — burial snapshot → genesis manifest → bbg root (specs/genesis.md)
 //! - [[wallet]] — sign and submit phase-1 root chain transactions (specs/chain.md)
 //! - [[chain]] — the phase-1 proof-of-work root chain kernel (specs/chain.md);

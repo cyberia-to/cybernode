@@ -12,7 +12,7 @@ use radio::EndpointId;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use super::chain_view::{BlockError, BlockVerdict, HeaderVerdict};
+use super::chain_view::{BlockError, BlockVerdict, HeaderError, HeaderVerdict};
 use super::codec::{Header, Id, U256};
 use super::frames::{Frame, MAX_HEADERS_PER_RESPONSE, MAX_RANGE};
 use super::transport::{request, WireError};
@@ -112,15 +112,8 @@ pub(crate) async fn header_sync(inner: &Arc<Inner>, peer: EndpointId, conn: &rad
     // none — waits up to an hour for the next one to be signed, and meanwhile
     // follows a heavier rewrite deeper than MAX_REORG (simulation
     // audit/network-2026-10.md, `reorg-140-checkpoints-unfetched`).
-    if ask_checkpoints && inner.chain.checkpoint_key().is_some() {
-        let from_height = inner.checkpoints.lock().expect("checkpoints").last().map(|c| c.height + 1).unwrap_or(0);
-        if let Ok(frames) = request(conn, Frame::GetCheckpoints { from_height }).await {
-            for f in frames {
-                if let Frame::Checkpoint(c) = f {
-                    super::gossip::hold_checkpoint(inner, &peer, &c);
-                }
-            }
-        }
+    if ask_checkpoints {
+        fetch_checkpoints(inner, peer, conn).await;
     }
     let theirs = U256::from_le_bytes(&s.chainwork);
     if theirs <= inner.chain.best_header().chainwork && inner.chain.header(&s.tip).is_some() {
@@ -140,8 +133,17 @@ pub(crate) async fn header_sync(inner: &Arc<Inner>, peer: EndpointId, conn: &rad
             break;
         }
         let now = now_unix();
+        let mut asked = false;
         for h in headers {
-            match inner.chain.accept_header(h, now) {
+            let mut verdict = inner.chain.accept_header(h, now);
+            // a rule set we do not know may be a revert statement we have not heard
+            // (chain.md §5.6): never scored; ask the peer for its statements once, and
+            // only if the header is still unexplained is it upgrade-required, as before
+            if verdict == Err(HeaderError::UnknownRuleSet) && !std::mem::replace(&mut asked, true) {
+                fetch_checkpoints(inner, peer, conn).await;
+                verdict = inner.chain.accept_header(h, now);
+            }
+            match verdict {
                 Ok(HeaderVerdict::Accepted) => total += 1,
                 Ok(HeaderVerdict::Known) => {}
                 Ok(HeaderVerdict::Orphan) => return Err(WireError::Protocol("headers out of order")),
@@ -160,6 +162,30 @@ pub(crate) async fn header_sync(inner: &Arc<Inner>, peer: EndpointId, conn: &rad
         inner.say(&format!("{total} headers from {}", short(&peer)));
     }
     Ok(total)
+}
+
+/// Ask `peer` for its checkpoints above ours and its revert statements
+/// (chain-wire §3: `k` answers both): the answer is held through the same
+/// paths as the gossip (signatures checked, bad ones +10). A node without a
+/// checkpoint key asks nothing.
+pub(crate) async fn fetch_checkpoints(inner: &Arc<Inner>, peer: EndpointId, conn: &radio::endpoint::Connection) {
+    if inner.chain.checkpoint_key().is_none() {
+        return;
+    }
+    let from_height = inner.checkpoints.lock().expect("checkpoints").last().map(|c| c.height + 1).unwrap_or(0);
+    if let Ok(frames) = request(conn, Frame::GetCheckpoints { from_height }).await {
+        for f in frames {
+            match f {
+                Frame::Checkpoint(c) => {
+                    super::gossip::hold_checkpoint(inner, &peer, &c);
+                }
+                Frame::Revert(bytes) => {
+                    super::gossip::hold_revert(inner, Some(&peer), &bytes);
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// The locator of our best *header* chain (bodies may lag during IBD).

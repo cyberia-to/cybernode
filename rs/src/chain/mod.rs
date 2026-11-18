@@ -4,7 +4,7 @@
 //!
 //! Module map follows chain.md §9.1. Consensus modules are pure functions
 //! over bytes; [`api`] is the surface the network, miner and HTTP layers
-//! code against; [`mine`] is the reference miner (`soft3 mine`); [`net`] is
+//! code against; [`mine`] is the reference miner (`cybernode mine`); [`net`] is
 //! the wire (specs/chain-wire.md), running on the kernel through
 //! [`net::kernel::KernelChain`].
 
@@ -18,6 +18,7 @@ pub mod economy;
 pub mod economy_api;
 pub mod engine;
 pub mod engine_api;
+pub mod engine_revert;
 pub mod engine_tx;
 pub mod genesis;
 pub mod header;
@@ -26,6 +27,8 @@ pub mod net;
 pub mod params;
 pub mod pool;
 pub mod pow;
+pub mod revert;
+pub mod revert_statement;
 pub mod select;
 pub mod sigs;
 pub mod state;

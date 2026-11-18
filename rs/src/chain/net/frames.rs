@@ -17,6 +17,8 @@ pub const MAX_RESPONSE_BYTES: usize = MAX_BLOCK_BYTES + 16;
 pub const MAX_REQUEST_BYTES: usize = 16 + 256 * 32;
 pub const STATUS_BYTES: usize = 32 + 2 + 8 + 32 + 32 + 32;
 pub const CHECKPOINT_BYTES: usize = 8 + 32 + SIG_BYTES;
+/// `version ‖ chain ‖ height ‖ keep ‖ counter ‖ anchor_time ‖ sig` (chain.md §5.6).
+pub const REVERT_BYTES: usize = 1 + 32 + 8 + 32 + 8 + 8 + SIG_BYTES;
 
 pub const ERR_UNKNOWN: u8 = 1;
 pub const ERR_PRUNED: u8 = 2;
@@ -73,6 +75,9 @@ pub enum Frame {
     Tx(Vec<u8>),
     GetCheckpoints { from_height: u64 },
     Checkpoint(Checkpoint),
+    /// A revert statement of the owner key (chain.md §5.6), its fixed-size
+    /// encoding; verified by the kernel, not by the codec.
+    Revert(Vec<u8>),
     End,
     Error { code: u8, reason: String },
     HeaderGossip(Header),
@@ -131,6 +136,7 @@ impl Frame {
             Frame::Tx(_) => b'T',
             Frame::GetCheckpoints { .. } => b'k',
             Frame::Checkpoint(_) => b'C',
+            Frame::Revert(_) => b'R',
             Frame::End => b'e',
             Frame::Error { .. } => b'x',
             Frame::HeaderGossip(_) => b'H',
@@ -196,7 +202,7 @@ impl Frame {
                 }
                 out
             }
-            Frame::Tx(bytes) | Frame::Shadow(bytes) => bytes.clone(),
+            Frame::Tx(bytes) | Frame::Shadow(bytes) | Frame::Revert(bytes) => bytes.clone(),
             Frame::GetCheckpoints { from_height } => from_height.to_le_bytes().to_vec(),
             Frame::Checkpoint(c) => c.encode(),
             Frame::End => Vec::new(),
@@ -305,6 +311,12 @@ impl Frame {
                 Ok(Frame::GetCheckpoints { from_height: u64_at(0) })
             }
             b'C' => Ok(Frame::Checkpoint(Checkpoint::decode(b)?)),
+            b'R' => {
+                if b.len() != REVERT_BYTES {
+                    return Err(FrameError::Length);
+                }
+                Ok(Frame::Revert(b.to_vec()))
+            }
             b'e' => {
                 if !b.is_empty() {
                     return Err(FrameError::Length);
@@ -399,6 +411,7 @@ mod tests {
             Frame::Tx(vec![1, 0, 9]),
             Frame::GetCheckpoints { from_height: 120 },
             Frame::Checkpoint(Checkpoint { height: 120, block_id: [9; 32], sig: vec![1; 102] }),
+            Frame::Revert(vec![3; REVERT_BYTES]),
             Frame::End,
             Frame::Error { code: 3, reason: "limit".into() },
             Frame::HeaderGossip(header()),
@@ -415,6 +428,17 @@ mod tests {
             let decoded = Frame::from_parts(chunks[0].sigil, chunks[0].render, &chunks[0].payload).unwrap();
             assert_eq!(decoded, frame);
             assert_eq!(Frame::decode(&bytes, MAX_RESPONSE_BYTES).unwrap(), frame);
+        }
+    }
+
+    #[test]
+    fn a_revert_statement_is_191_bytes_and_nothing_else() {
+        assert_eq!(REVERT_BYTES, 191);
+        let ok = Frame::Revert(vec![0; REVERT_BYTES]).encode();
+        assert!(matches!(Frame::decode(&ok, MAX_GOSSIP_BYTES), Ok(Frame::Revert(_))));
+        for len in [0, 1, REVERT_BYTES - 1, REVERT_BYTES + 1] {
+            let bad = tade::Chunk::new(SIGIL, b'R', bytes::Bytes::from(vec![0u8; len])).encode();
+            assert_eq!(Frame::decode(&bad, MAX_GOSSIP_BYTES), Err(FrameError::Length), "{len}");
         }
     }
 

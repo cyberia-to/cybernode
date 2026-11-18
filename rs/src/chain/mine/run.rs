@@ -12,7 +12,7 @@ use super::{Backend, Job};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// `soft3 mine` settings.
+/// `cybernode mine` settings.
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub chain: String,
@@ -207,7 +207,7 @@ fn leading_zeros(t: &[u64; 4]) -> u32 {
     z
 }
 
-/// `soft3 mine`: the loop over templates. Returns only on an unrecoverable
+/// `cybernode mine`: the loop over templates. Returns only on an unrecoverable
 /// error or when `stop` is raised.
 pub fn run(
     backend: &dyn Backend,
@@ -218,7 +218,7 @@ pub fn run(
     let client = Client::new(&s.node, &s.address);
     let salt = salt();
     log(&format!(
-        "soft3 mine · chain {} · node {} · {} · to {}",
+        "cybernode mine · chain {} · node {} · {} · to {}",
         s.chain,
         s.node,
         backend.name(),

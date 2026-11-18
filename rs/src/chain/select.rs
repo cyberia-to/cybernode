@@ -145,6 +145,16 @@ impl Checkpoints {
         self.held.keys().next_back().copied()
     }
 
+    /// Verify `sig` over `statement` under the foundation key: the check a
+    /// revert statement (§5.6) makes, with its own domain tag, no interval
+    /// and no sunset.
+    pub fn verify_statement(&self, statement: [u8; 32], sig: &[u8]) -> Result<(), CheckpointError> {
+        if self.key.is_none() {
+            return Err(CheckpointError::Disabled);
+        }
+        if mudra::neuron::verify_statement(self.subject, statement, sig) { Ok(()) } else { Err(CheckpointError::Signature) }
+    }
+
     /// Verify and hold a checkpoint. `Ok(true)` when it is new, `Ok(false)`
     /// when already held; a checkpoint past the sunset is ignored as an
     /// error the caller may log without scoring (§5.3).

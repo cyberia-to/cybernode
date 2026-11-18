@@ -1,4 +1,4 @@
-//! `soft3 mine` against a mock chain node: `GET /template`, `GET /tip`,
+//! `cybernode mine` against a mock chain node: `GET /template`, `GET /tip`,
 //! `POST /submit` (chain-wire §7 shapes). The mock serves a template at
 //! `POW_LIMIT` (2^236, about a million hashes), verifies every submitted
 //! header natively with `hemera::hash`, advances its tip on acceptance,

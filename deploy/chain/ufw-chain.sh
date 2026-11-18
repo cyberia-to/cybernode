@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Open (or close) the radio QUIC/UDP port of one chain instance in ufw, idempotently, with a log line.
 #
-#   sudo ./ufw-chain.sh open  pussy     # reads SOFT3_RADIO from /etc/soft3/pussy.env
+#   sudo ./ufw-chain.sh open  pussy     # reads SOFT3_RADIO from /etc/soft3/pussy.env (kept path, see README § kept names)
 #   sudo ./ufw-chain.sh close pussy
 #   sudo ./ufw-chain.sh show  pussy
 #
 # Only the UDP port is touched. The HTTP API stays on loopback behind nginx (80/443 are already open
-# on every cybernode machine). jupiter has no passwordless sudo: run this there as root by hand.
+# on every apparatus host). jupiter has no passwordless sudo: run this there as root by hand.
 set -euo pipefail
 
 action="${1:-}"; chain="${2:-}"
@@ -21,7 +21,7 @@ comment="cybernode-$chain-radio"
 log="/var/log/cybernode/ufw.log"
 mkdir -p "$(dirname "$log")"
 
-present() { ufw status | grep -qE "^$port/udp\s+ALLOW IN\s+Anywhere" ; }
+present() { ufw status | grep -qE "^$port/udp\s+ALLOW(\s+IN)?\s+Anywhere" ; }
 
 case "$action" in
   show)

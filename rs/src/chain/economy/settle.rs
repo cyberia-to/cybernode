@@ -411,7 +411,12 @@ pub fn apply<S: StateBackend>(state: &mut S, native: &Id, height: u64, r: &Settl
         paid += pay;
         payouts.push((e.card, e.owner, pay));
     }
-    debug_assert!(paid <= budget && budget <= f);
+    if budget > f {
+        return Err(StateError::Insufficient { have: f, need: budget });
+    }
+    if paid > budget {
+        return Err(StateError::Insufficient { have: budget, need: paid });
+    }
     state.debit_raw(&pool, native, paid)?;
 
     let keep: std::collections::BTreeSet<Id> = r.marks.iter().map(|(a, _)| *a).collect();

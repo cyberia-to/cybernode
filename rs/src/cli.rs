@@ -150,6 +150,8 @@ struct NodeArgs {
     relay: bool,
     log_net: bool,
     corpus: Option<PathBuf>,
+    /// `--revert` rehearsal entries (chain.md §5.6), repeatable
+    reverts: Vec<crate::chain::revert::RevertEntry>,
 }
 
 /// Why [`parse_node_args`] could not resolve a flag set.
@@ -159,6 +161,8 @@ enum NodeArgError {
     MissingValue(&'static str),
     /// An argument matched none of the known flags.
     Unknown(String),
+    /// A `--revert` value that does not parse.
+    BadRevert(String),
 }
 
 /// Parse `cybernode node`'s argv into [`NodeArgs`], starting from the caller's
@@ -174,7 +178,7 @@ fn parse_node_args(
 ) -> Result<NodeArgs, NodeArgError> {
     let mut out = NodeArgs {
         home: default_home, bind: default_bind, moniker: default_moniker, help: false, chain: None, home_set: false, bind_set: false,
-        radio: None, peers: None, genesis: None, neuron: None, relay: false, log_net: false, corpus: None,
+        radio: None, peers: None, genesis: None, neuron: None, relay: false, log_net: false, corpus: None, reverts: Vec::new(),
     };
     let mut i = 0;
     while i < args.len() {
@@ -200,6 +204,10 @@ fn parse_node_args(
             "--relay" => out.relay = true,
             "--log-net" => out.log_net = true,
             "--corpus" => out.corpus = Some(PathBuf::from(value(&mut i, "--corpus needs a directory")?)),
+            "--revert" => {
+                let v = value(&mut i, "--revert needs <height>:<keep_hex>:<vetoed_hex>[,<vetoed_hex>…]:<anchor_time>[:<rule_set>]")?;
+                out.reverts.push(crate::chain::revert::parse_flag(&v).map_err(NodeArgError::BadRevert)?);
+            }
             "-h" | "--help" => {
                 out.help = true;
                 return Ok(out);
@@ -259,6 +267,10 @@ fn cmd_node(args: &[String]) {
             eprintln!("unknown node flag `{flag}`");
             std::process::exit(2);
         }
+        Err(NodeArgError::BadRevert(msg)) => {
+            eprintln!("{msg}");
+            std::process::exit(2);
+        }
     };
     if node_args.help {
         println!("cybernode node — run spacepussy-test (cybergraph + bbg) or a phase-1 root chain");
@@ -267,9 +279,15 @@ fn cmd_node(args: &[String]) {
         println!("  cybernode node --chain <pussy|bostrom|dev…> --home DIR --bind HOST:PORT --radio HOST:UDP --peers FILE --moniker NAME");
         println!("             [--genesis FILE] [--neuron NEURON] [--relay] [--log-net]");
         println!("             [--corpus DIR]   # record every block given, with its verdict and state root (blocks.jsonl)");
+        println!("             [--revert HEIGHT:KEEP_HEX:VETOED_HEX[,VETOED_HEX…]:ANCHOR_TIME[:RULE_SET]]…");
+        println!("                              # REHEARSAL of a revert by release (chain.md §5.6), repeatable: the chain returns to block KEEP");
+        println!("                              # at HEIGHT, the VETOED ids and their descendants are invalid, difficulty re-anchors at");
+        println!("                              # ANCHOR_TIME (unix seconds), blocks above HEIGHT carry rule set RULE_SET (default: the last");
+        println!("                              # known rule set + 1). /status and every Reverted event say rehearsal: true; the node refuses to");
+        println!("                              # start on a production chain (pussy, bostrom)");
         println!("             (mining is `cybernode mine --node http://BIND --address NEURON`: /template + /submit)");
         println!("  cybernode node id --home DIR      # radio endpoint id (64 hex) for peers.toml");
-    println!("  cybernode genesis build --chain pussy|bostrom --snapshot DIR --out FILE");
+    println!("  cybernode genesis build --chain pussy|bostrom|pussy-rc --snapshot DIR --out FILE");
     println!("                      [--cache DIR] [--export DIR] [--no-root] [--time UNIX]");
     println!("  cybernode genesis verify FILE [--root]");
     println!("  cybernode conformance bless|check chain [--genesis FILE]");
@@ -304,7 +322,7 @@ fn cmd_node(args: &[String]) {
             home: if node_args.home_set { node_args.home } else { node::chain_node::default_home(&chain) },
             chain, genesis: node_args.genesis, radio: Some(radio), peers: node_args.peers, moniker: node_args.moniker,
             neuron,
-            relay: node_args.relay, log_net: node_args.log_net, corpus: node_args.corpus,
+            relay: node_args.relay, log_net: node_args.log_net, corpus: node_args.corpus, reverts: node_args.reverts,
         };
         if let Err(e) = node::run_chain(opts, &bind) {
             eprintln!("cybernode node failed: {e}");
@@ -404,6 +422,10 @@ fn cmd_mine(args: &[String]) {
         }
         Err(NodeArgError::Unknown(flag)) => {
             eprintln!("unknown mine flag `{flag}`");
+            std::process::exit(2);
+        }
+        Err(NodeArgError::BadRevert(msg)) => {
+            eprintln!("{msg}");
             std::process::exit(2);
         }
     };
@@ -529,6 +551,9 @@ fn cmd_chain(args: &[String]) {
         Some("genesis-dev") => {
             let name = flags.get("name").cloned().unwrap_or_else(|| "dev".into());
             if node::chain_node::LAUNCH_CHAINS.contains(&name.as_str()) {
+                if name == "pussy-rc" {
+                    die("`pussy-rc` is a launch chain; its genesis comes from `cybernode genesis build --chain pussy-rc --time T`".into());
+                }
                 die(format!("`{name}` is a launch chain; its genesis comes from `cybernode genesis build`"));
             }
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -558,6 +583,37 @@ fn cmd_chain(args: &[String]) {
             println!("{}", hex(&genesis.chain_id));
         }
         Some("key") => println!("{}", wallet(&flags).neuron_hex()),
+        // chain.md §5.6: the owner's revert statement, signed offline by the checkpoint
+        // key; the seed is read from the flag like `chain key --seed` and never stored
+        Some("revert-sign") => {
+            use crate::chain::params::{CHAINS, MAX_FUTURE_DRIFT};
+            let chain_id = match (flags.get("chain"), flags.get("genesis")) {
+                (Some(c), _) => unhex32(c)
+                    .or_else(|| CHAINS.iter().find(|x| x.name == c.as_str() && x.pinned()).map(|x| x.chain_id))
+                    .unwrap_or_else(|| die(format!("--chain {c}: a pinned chain name (pussy) or the 64 hex chain id"))),
+                (None, Some(g)) => {
+                    let bytes = std::fs::read(g).unwrap_or_else(|e| die(format!("--genesis {g}: {e}")));
+                    crate::chain::genesis::Genesis::decode(&bytes).unwrap_or_else(|e| die(format!("genesis: {e}"))).chain_id
+                }
+                (None, None) => die("--chain <name|64 hex id> (or --genesis FILE) required".into()),
+            };
+            let height: u64 = flags.get("height").and_then(|v| v.parse().ok()).unwrap_or_else(|| die("--height <H> required".into()));
+            let keep = flags.get("keep").and_then(|k| unhex32(k)).unwrap_or_else(|| die("--keep <64 hex block id at H> required".into()));
+            let counter: u64 = flags.get("counter").and_then(|v| v.parse().ok()).unwrap_or_else(|| die("--counter <N> required (above every counter signed before)".into()));
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let floor = now.saturating_add(MAX_FUTURE_DRIFT).saturating_add(1);
+            let anchor_time = num(&flags, "anchor-time", floor);
+            if anchor_time < floor {
+                die(format!("--anchor-time {anchor_time} is below now + {MAX_FUTURE_DRIFT} s drift + 1 s = {floor}: a block a node accepted before the statement could carry it"));
+            }
+            let seed = flags.get("seed").and_then(|s| unhex32(s)).unwrap_or_else(|| die("--seed <64 hex> required".into()));
+            let key = mudra::SigningKey::from_bytes((&seed).into()).unwrap_or_else(|e| die(format!("seed: {e}")));
+            let st = crate::chain::revert_statement::RevertStatement::sign(&chain_id, height, keep, counter, anchor_time, &key)
+                .unwrap_or_else(|e| die(format!("sign: {e}")));
+            println!("{}", hex(&st.encode()));
+            eprintln!("revert statement: chain {} height {height} keep {} counter {counter} anchor_time {anchor_time}", hex(&chain_id), hex(&keep));
+            eprintln!("submit: curl -X POST --data <the hex above> http://NODE/checkpoints/revert");
+        }
         Some("tx") => {
             let w = wallet(&flags);
             let bytes = flags.get("genesis").and_then(|g| std::fs::read(g).ok()).unwrap_or_else(|| die("--genesis <file> required (the chain id is its particle)".into()));
@@ -597,6 +653,7 @@ fn cmd_chain(args: &[String]) {
         _ => {
             eprintln!("usage: cybernode chain genesis-dev [--name dev] [--time T] [--bits HEX] [--fund NEURON=AMOUNT]… --out FILE");
             eprintln!("       cybernode chain key --seed HEX32");
+            eprintln!("       cybernode chain revert-sign --seed HEX32 --chain NAME|HEX32 --height H --keep HEX32 --counter N [--anchor-time T]");
             eprintln!("       cybernode chain tx --seed HEX32 --genesis FILE --nonce N [--kind transfer|link|unlock|payout] [--to N] [--amount A] [--fee F] [--p P --q Q] [--valence V] [--payout OWNER]");
             std::process::exit(2);
         }
@@ -613,7 +670,7 @@ fn hostname_fallback() -> String {
 fn hostname_fallback_from<F: Fn(&str) -> Result<String, std::env::VarError>>(get: F) -> String {
     get("HOSTNAME")
         .or_else(|_| get("HOST"))
-        .unwrap_or_else(|_| "soft3-node".into())
+        .unwrap_or_else(|_| "cybernode".into())
 }
 
 fn print_network(n: Network) {
@@ -654,14 +711,14 @@ fn print_help() {
     println!("  cybernode mine bench [--backend ...] [--threads N] [--seconds S]");
     println!("  cybernode node --chain <pussy|bostrom|dev> --home DIR --bind HOST:PORT --radio HOST:UDP --peers FILE --moniker NAME");
     println!("  cybernode node id --home DIR");
-    println!("  cybernode chain genesis-dev|key|tx …   # dev helpers");
-    println!("  cybernode genesis build --chain pussy|bostrom --snapshot DIR --out FILE");
+    println!("  cybernode chain genesis-dev|key|tx|revert-sign …   # dev helpers; revert-sign signs the owner's revert statement");
+    println!("  cybernode genesis build --chain pussy|bostrom|pussy-rc --snapshot DIR --out FILE");
     println!("                      [--cache DIR] [--export DIR] [--no-root] [--time UNIX]");
     println!("  cybernode genesis verify FILE [--root]");
-    println!("  soft3 manifesto");
-    println!("  soft3 version");
+    println!("  cybernode manifesto");
+    println!("  cybernode version");
     println!();
-    println!("not soft3 networks (cosmos bootloader on cybernode):");
+    println!("not soft3 networks (cosmos bootloader on apparatus hosts):");
     println!("  space-pussy · bostrom");
     println!();
     println!("docs  https://cyber.page/soft3/docs/launch");
@@ -764,6 +821,27 @@ mod tests {
     }
 
     #[test]
+    fn node_args_revert_is_repeatable_and_validated() {
+        let (home, bind, moniker) = defaults();
+        let (k, v) = ("11".repeat(32), "22".repeat(32));
+        let args = vec![
+            "--revert".to_string(),
+            format!("5:{k}:{v}:1700000000"),
+            "--revert".to_string(),
+            format!("9:{k}:{v},{v}:1700000100:4"),
+        ];
+        let parsed = parse_node_args(&args, home.clone(), bind.clone(), moniker.clone()).ok().unwrap();
+        assert_eq!(parsed.reverts.len(), 2);
+        assert!(parsed.reverts.iter().all(|r| r.rehearsal));
+        assert_eq!((parsed.reverts[0].height, parsed.reverts[0].rule_set), (5, 0));
+        assert_eq!((parsed.reverts[1].vetoed.len(), parsed.reverts[1].rule_set), (2, 4));
+        let bad = vec!["--revert".to_string(), "5:nothex:x:1".to_string()];
+        assert!(matches!(parse_node_args(&bad, home.clone(), bind.clone(), moniker.clone()).err().unwrap(), NodeArgError::BadRevert(_)));
+        let missing = vec!["--revert".to_string()];
+        assert!(matches!(parse_node_args(&missing, home, bind, moniker).err().unwrap(), NodeArgError::MissingValue(_)));
+    }
+
+    #[test]
     fn node_args_last_flag_wins_on_repeats() {
         let (home, bind, moniker) = defaults();
         let args = vec![
@@ -841,7 +919,7 @@ mod tests {
     #[test]
     fn hostname_fallback_defaults_when_neither_env_is_set() {
         let got = hostname_fallback_from(|_: &str| Err(std::env::VarError::NotPresent));
-        assert_eq!(got, "soft3-node");
+        assert_eq!(got, "cybernode");
     }
 
     fn v(items: &[&str]) -> Vec<String> {
@@ -903,16 +981,33 @@ fn cmd_conformance(args: &[String]) {
         std::process::exit(2);
     }
     let value = |flag: &str| -> Option<String> { args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned() };
-    let snap = value("--snap").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../conformance/chain.snap")));
+    let snap = value("--snap").map(PathBuf::from).unwrap_or_else(conformance::chain_snap_path);
     let genesis = value("--genesis").map(PathBuf::from).unwrap_or_else(|| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         PathBuf::from(home).join(".cache/cyber/genesis/pussy.tade")
     });
     let committed = std::fs::read_to_string(&snap).map(|s| conformance::parse(&s)).unwrap_or_default();
     let mut current = conformance::entries();
+    let mut pins_ok = true;
     match std::fs::read(&genesis) {
         Ok(bytes) => match conformance::genesis_entries("pussy", &bytes) {
-            Ok(e) => current.extend(e),
+            Ok(e) => {
+                // the binary's pins must equal the file the gate built from the burial
+                if let Some(pin) = crate::chain::params::embedded("pussy").filter(|c| c.pinned()) {
+                    for (scenario, pinned) in [("pussy particle", pin.chain_id), ("pussy block0_id", pin.genesis_block)] {
+                        let file = e.iter().find(|x| x.scenario == scenario).map(|x| x.value);
+                        if file != Some(pinned) {
+                            let file = file.map(|v| crate::wallet::hex(&v)).unwrap_or_else(|| "(absent)".into());
+                            eprintln!("pins: {scenario} is {} in this build but {file} in {}", crate::wallet::hex(&pinned), genesis.display());
+                            pins_ok = false;
+                        }
+                    }
+                    if pins_ok {
+                        println!("pins: pussy particle and block0_id match this build");
+                    }
+                }
+                current.extend(e);
+            }
             Err(e) => {
                 eprintln!("conformance: {} is not a genesis: {e}", genesis.display());
                 std::process::exit(1);
@@ -927,6 +1022,10 @@ fn cmd_conformance(args: &[String]) {
     }
     match sub {
         "check" => {
+            if !pins_ok {
+                eprintln!("chain.snap: the pins in rs/src/chain/params.rs do not match the genesis file");
+                std::process::exit(1);
+            }
             if drift.is_empty() {
                 println!("chain.snap: {} entries, no drift", current.len());
             } else {
@@ -973,7 +1072,7 @@ fn cmd_genesis(args: &[String]) {
     match sub {
         "build" => {
             let Some(chain) = value("--chain").and_then(|c| Chain::parse(&c)) else {
-                eprintln!("genesis build: --chain pussy|bostrom is required");
+                eprintln!("genesis build: --chain pussy|bostrom|pussy-rc is required");
                 std::process::exit(2);
             };
             let Some(snapshot) = value("--snapshot") else {
@@ -1061,7 +1160,7 @@ fn cmd_genesis(args: &[String]) {
             }
         }
         _ => {
-            eprintln!("usage: cybernode genesis build --chain pussy|bostrom --snapshot DIR --out FILE [--cache DIR] [--export DIR] [--no-root] [--time UNIX]");
+            eprintln!("usage: cybernode genesis build --chain pussy|bostrom|pussy-rc --snapshot DIR --out FILE [--cache DIR] [--export DIR] [--no-root] [--time UNIX]");
             eprintln!("       cybernode genesis verify FILE [--root]");
             std::process::exit(2);
         }

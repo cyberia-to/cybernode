@@ -1,10 +1,10 @@
-# soft3 phase-1 root chain — one instance per chain: cybernode@pussy, cybernode@bostrom.
+# cybernode — the phase-1 root chain, one instance per chain: cybernode@pussy, cybernode@bostrom.
 # Parameters come from /etc/soft3/<chain>.env (template: chain.env.example).
 # Install: sudo cp cybernode@.service /etc/systemd/system/ && sudo systemctl daemon-reload
 # Start:   sudo systemctl enable --now cybernode@pussy   (genesis day only — see README.md)
 [Unit]
 Description=cybernode — root chain node (%i) — cybergraph + bbg + radio
-Documentation=https://github.com/cyberia-to/soft3/tree/main/deploy/chain
+Documentation=https://github.com/cyberia-to/cybernode/tree/master/deploy/chain
 After=network-online.target time-sync.target
 Wants=network-online.target time-sync.target
 # PoW timestamp rules assume a sane clock: refuse to start when the clock is not NTP-synchronized.

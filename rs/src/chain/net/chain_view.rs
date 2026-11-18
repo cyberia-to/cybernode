@@ -35,10 +35,12 @@ pub enum HeaderError {
     BadTarget,
     BadPow,
     InvalidParent,
+    /// A rule set this node does not know (chain.md §7.1): never scored.
     UnknownRuleSet,
-    /// A fork beyond `MAX_REORG` or one that excludes a held checkpoint
-    /// (chain.md §5.2–5.3): logged, never scored — an honest peer on a
-    /// stale branch sends these.
+    /// A fork beyond `MAX_REORG`, one that excludes a held checkpoint
+    /// (chain.md §5.2–5.3), or a header vetoed by the revert table or
+    /// descending from one (§5.6): logged, never scored — an honest peer on
+    /// a stale branch sends these.
     Refused(String),
     /// The local store failed: our problem, not the peer's.
     Store(String),
@@ -50,8 +52,9 @@ impl HeaderError {
         match self {
             HeaderError::BadPow | HeaderError::WrongChain => 100,
             HeaderError::Syntax(_) | HeaderError::BadBits | HeaderError::BadTime | HeaderError::BadTarget => 10,
-            HeaderError::BadParent | HeaderError::InvalidParent | HeaderError::UnknownRuleSet => 10,
-            HeaderError::Refused(_) | HeaderError::Store(_) => 0,
+            HeaderError::BadParent | HeaderError::InvalidParent => 10,
+            // a peer of another release is not an attacker (chain-wire §5, chain.md §5.6)
+            HeaderError::UnknownRuleSet | HeaderError::Refused(_) | HeaderError::Store(_) => 0,
         }
     }
 }
@@ -118,6 +121,22 @@ impl std::fmt::Display for BlockError {
             BlockError::Invalid(s) => write!(f, "invalid: {s}"),
             BlockError::Store(s) => write!(f, "store: {s}"),
         }
+    }
+}
+
+/// A revert statement the kernel did not take (chain.md §5.6): why, and what
+/// the peer that sent it is charged. A statement that is not the owner's
+/// (bad signature, not a statement) is an offence; one the node cannot use
+/// (disabled, inconsistent with its store, a counter not above the held) is not.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct StatementRefusal {
+    pub reason: String,
+    pub score: u32,
+}
+
+impl std::fmt::Display for StatementRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.reason)
     }
 }
 
@@ -189,6 +208,17 @@ pub trait ChainView: Send + Sync + 'static {
     fn retry_held(&self, now: u64) -> Vec<Header>;
     /// A checkpoint whose signature the wire verified (chain.md §5.3).
     fn accept_checkpoint(&self, height: u64, block_id: &Id, sig: &[u8]) -> Result<bool, String>;
+    /// An encoded revert statement of the owner key (chain.md §5.6, chain-wire
+    /// §2): verified, held, persisted and applied by the kernel. `Ok(true)`
+    /// when it is new — the gossip path relays it then; `Ok(false)` when it
+    /// changes nothing.
+    fn accept_revert_statement(&self, _bytes: &[u8]) -> Result<bool, StatementRefusal> {
+        Ok(false)
+    }
+    /// The held revert statements, encoded, ascending by counter.
+    fn revert_statements(&self) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
     /// Heights of the best header chain above the tip whose bodies we lack, ascending.
     fn missing_bodies(&self, max: usize) -> Vec<(u64, Id)>;
 

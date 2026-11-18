@@ -1,0 +1,17 @@
+name: Deploy scripts
+on:
+  pull_request:
+    paths: ['deploy/**', '.github/workflows/deploy-tests.yml']
+  push:
+    branches: [main, 'release/**']
+    paths: ['deploy/**', '.github/workflows/deploy-tests.yml']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: bash deploy/chain/tests/run.sh

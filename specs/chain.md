@@ -5,7 +5,7 @@ crystal-type: spec
 crystal-domain: cyber
 status: accepted
 date: 2026-10-15
-alias: chain spec, root chain, phase-1 chain, soft3 chain, pussy chain, bostrom chain
+alias: chain spec, root chain, phase-1 chain, cybernode chain, soft3 chain, pussy chain, bostrom chain
 ---
 
 # chain — the phase-1 root chain
@@ -668,8 +668,8 @@ Rules:
   carried as its own token instead), so S0 for pussy is the bank supply at
   halt, 1,099,389,810,279,114,036, and `SUBSIDY = 10,458,426,657`.
 
-The pipeline is a deterministic program — `soft3 genesis build` in
-`soft3/crate/src/genesis/` (`specs/genesis.md`; `chain/genesis.rs` consumes
+The pipeline is a deterministic program — `cybernode genesis build` in
+`rs/src/genesis/` (`specs/genesis.md`; `chain/genesis.rs` consumes
 its output through `soft3::genesis::state::load`) — whose output file
 particle is published on the launch page and in the binary; two independent
 runs must produce byte-identical files (chain-conformance §10).
@@ -690,7 +690,7 @@ Genesis times (cyber/launch decisions 2026-09-18): pussy
 
 ### 4.4 two chains, one binary
 
-`soft3 node --chain pussy | bostrom [--genesis path]`. The binary embeds the
+`cybernode node --chain pussy | bostrom [--genesis path]`. The binary embeds the
 two chain ids and genesis block ids; `--genesis` is for rehearsal nets
 (`pussy-rc`) and must match the embedded id for the named chain. All
 protocol constants (§0) are identical on both chains; only the genesis file
@@ -929,8 +929,9 @@ Threats and mitigations, in one list:
 
 ### 9.1 crate and placement
 
-The chain is `soft3 node --chain <name>` in `soft3/crate` — the existing
-node crate (rung 7 of the ladder: radio · foculus · tade), reusing `node.rs`
+The chain is `cybernode node --chain <name>` in `cybernode/rs` — the node
+crate (rung 7 of the ladder: radio · foculus · tade; moved from `soft3/crate`
+on 2026-10-27, proposal cybernode), reusing `node.rs`
 and the HTTP adapter, with a new `chain` module tree. Reasons: the ladder
 places the network and its consensus at soft3, below cyb and cyber and above
 cybergraph/bbg; the HTTP contract cyb and true-cyber consume already lives
@@ -944,7 +945,7 @@ only: `hemera` (commit), `bbg` and `cybergraph` (graph), `mudra` and
 them.
 
 ```
-soft3/crate/src/chain/
+cybernode/rs/src/chain/
   mod.rs          Chain: open(home, name) → tip, state, mempool; Event bus
   params.rs       §0 constants, ACTIVATIONS, embedded chain ids and genesis ids
   header.rs       Header encode/decode (168 B), block_id, bits codec (§1.1–1.3)
@@ -993,7 +994,7 @@ Decisions this page could not settle alone, each with the default the
 implementation uses until the owner says otherwise.
 
 Owner decisions 2026-10-15 (recorded by the kernel implementation,
-`crate/src/chain/`): every default below stands except item 2. Item 2 was
+`rs/src/chain/`): every default below stands except item 2. Item 2 was
 decided "amount must be 0" on 2026-10-15 and is superseded by the order of
 2026-10-17: a cyberlink with `amount > 0` locks native stake on its
 position, unlocked by kind 6 after `MIN_LOCK` (chain-economy §3); the
@@ -1034,7 +1035,7 @@ pinned constants. The chain freezes hemera's profile #15 (x⁷ in every
 round, 6 + 6 full rounds, 48 partial; hemera 0.4, `release/0.4` `7237a23`);
 every value quoted is computed against it (re-blessed 2026-10-16 from the
 0.3 values, with the genesis particle; the definitions did not change).
-Reference implementation: `crate/src/chain/pool/`; vectors:
+Reference implementation: `rs/src/chain/pool/`; vectors:
 chain-conformance §12.
 
 ### 11.1 wide digests and canonical limbs

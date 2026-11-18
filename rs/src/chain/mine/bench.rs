@@ -1,4 +1,4 @@
-//! `soft3 mine bench`: hashes per second of every backend that opens, and
+//! `cybernode mine bench`: hashes per second of every backend that opens, and
 //! the conformance vector found by each (chain-conformance §5: the mined
 //! header at `GENESIS_BITS`, nonce 934,636).
 

@@ -1,5 +1,5 @@
-//! Adversarial wire tests against a real `soft3 node --chain dev` process on
-//! the consensus kernel, mined by a real `soft3 mine --backend cpu` process
+//! Adversarial wire tests against a real `cybernode node --chain dev` process on
+//! the consensus kernel, mined by a real `cybernode mine --backend cpu` process
 //! (chain-wire.md §5, chain-conformance.md §11): oversized and malformed
 //! frames, a stream without the dialect, a wrong-chain status, a body
 //! pushed on gossip, a PoW-invalid header (never followed by a body
@@ -81,12 +81,12 @@ fn wait_until(secs: u64, mut f: impl FnMut() -> bool) -> bool {
 const MINER: &str = "6666666666666666666666666666666666666666666666666666666666666666";
 
 /// One dev node in a scratch home, a test genesis at the floor target, and
-/// a `soft3 mine` process working it.
+/// a `cybernode mine` process working it.
 fn spawn_node(label: &str) -> (NodeProc, Vec<u8>) {
     let home = std::env::temp_dir().join(format!("chain-adversary-{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).unwrap();
-    let bin = env!("CARGO_BIN_EXE_soft3");
+    let bin = env!("CARGO_BIN_EXE_cybernode");
     let genesis_path = home.join("genesis.tade");
     let made = Command::new(bin).args(["chain", "genesis-dev", "--name", "dev", "--fund", &format!("{MINER}=1000000000"), "--out"]).arg(&genesis_path).output().unwrap();
     assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));

@@ -2,6 +2,7 @@
 //!
 //! Every number in `specs/chain.md` §0 lives here and nowhere else.
 
+use super::header::BlockId;
 use super::u256::U256;
 
 /// Header size in bytes (§1.1).
@@ -157,8 +158,29 @@ pub const RULE_SET: u16 = 1;
 /// Rule set 1 activates at height 0; a later release appends rule set 2.
 pub const ACTIVATIONS: &[(u16, u64)] = &[(RULE_SET, 0)];
 
+/// One entry of the compiled revert table (§5.6): the chain returns to the
+/// block `keep` at `height` (H), every id in `vetoed` and its descendants is
+/// invalid, the difficulty re-anchors at `anchor_time`, and `rule_set` is
+/// the rule set from `H + 1` on (it appends `(rule_set, H + 1)` to
+/// [`ACTIVATIONS`]). The runtime form, with owned vetoed ids and the
+/// rehearsal flag, is `revert::RevertEntry`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Revert {
+    pub height: u64,
+    pub keep: BlockId,
+    pub vetoed: &'static [BlockId],
+    pub anchor_time: u64,
+    pub rule_set: u16,
+}
+
+/// The revert table of this release (§5.6). Entries are sorted by `height`;
+/// the genesis release carries the machinery with an empty table.
+pub const REVERTS: &[Revert] = &[];
+
 /// The rule set in force at `height`, or `None` when the table ends before
-/// it — a node then stops accepting blocks at that height (§7.1).
+/// it — a node then stops accepting blocks at that height (§7.1). This is
+/// the compiled [`ACTIVATIONS`] alone; the engine uses
+/// `RevertTable::rule_set_at`, which adds the revert entries.
 pub fn rule_set_at(height: u64) -> Option<u16> {
     ACTIVATIONS
         .iter()
@@ -177,6 +199,8 @@ pub const DOMAIN_TXID: &[u8] = b"soft3/chain/txid/v1\0";
 pub const DOMAIN_SIGN: &[u8] = b"soft3/chain/sign/v1\0";
 pub const DOMAIN_LEGACY: &[u8] = b"soft3/chain/legacy/v1\0";
 pub const DOMAIN_CHECKPOINT: &[u8] = b"soft3/chain/checkpoint/v1\0";
+/// The revert statement's own tag (§5.6): never the checkpoint's.
+pub const DOMAIN_REVERT: &[u8] = b"soft3/chain/revert/v1\0";
 pub const DOMAIN_TOPIC: &[u8] = b"soft3/chain/topic/v1\0";
 
 /// `POW_LIMIT` as a target.
@@ -252,9 +276,12 @@ pub fn subsidy(s0: u64) -> u64 {
 }
 
 /// An embedded chain: name, hrp, chain id (= genesis file particle) and the
-/// id of block 0. Zero ids mean "not yet pinned": the genesis pipeline
-/// (specs/genesis.md, cyber/launch rows 14/20) publishes them and a release
-/// carries them here; until then `--genesis` is mandatory for that chain.
+/// id of block 0. Non-zero ids are pinned: the node refuses a genesis file
+/// whose particle differs, and a kernel whose block 0 differs. pussy is
+/// pinned to the values blessed 2026-10-17 in `conformance/chain-genesis.toml`
+/// (and `chain.snap`). Zero ids mean "not yet pinned": bostrom waits until
+/// pussy's genesis is covered end to end; until pinned, `--genesis` is
+/// mandatory for that chain and any file naming it is accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmbeddedChain {
     pub name: &'static str,
@@ -264,16 +291,44 @@ pub struct EmbeddedChain {
     pub genesis_time: u64,
 }
 
+impl EmbeddedChain {
+    /// True once the chain id is pinned (non-zero).
+    pub fn pinned(&self) -> bool {
+        self.chain_id != [0; 32]
+    }
+}
+
+/// Decode 64 hex digits at compile time; a typo in a pin fails the build.
+const fn h32(s: &str) -> [u8; 32] {
+    const fn nibble(c: u8) -> u8 {
+        match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            _ => panic!("pin is not lowercase hex"),
+        }
+    }
+    let b = s.as_bytes();
+    assert!(b.len() == 64, "pin is not 64 hex digits");
+    let mut out = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        out[i] = (nibble(b[2 * i]) << 4) | nibble(b[2 * i + 1]);
+        i += 1;
+    }
+    out
+}
+
 /// The two chains one binary serves (§4.4).
 pub const CHAINS: &[EmbeddedChain] = &[
     EmbeddedChain {
         name: "pussy",
         hrp: "pussy",
-        chain_id: [0; 32],
-        genesis_block: [0; 32],
+        chain_id: h32("bae85f40d9f508664b5214107551be95d3f188d9585a899178c23e80886720e5"),
+        genesis_block: h32("73208ee2d43fbb0420119ceff23eab79e9d96921050e2a2137d0705c461852d4"),
         genesis_time: 1_793_885_820,
     },
     EmbeddedChain {
+        // unpinned on purpose: bostrom waits for pussy's genesis coverage
         name: "bostrom",
         hrp: "bostrom",
         chain_id: [0; 32],
@@ -290,6 +345,33 @@ pub fn embedded(name: &str) -> Option<&'static EmbeddedChain> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unhex(s: &str) -> [u8; 32] {
+        let b: Vec<u8> = (0..64).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect();
+        b.try_into().unwrap()
+    }
+
+    #[test]
+    fn pussy_pins_match_the_blessed_files_and_bostrom_is_unpinned() {
+        // soft3 owns the blessed files; resolve its directory the way chain_snap_path does.
+        let snap_path = crate::chain::conformance::chain_snap_path();
+        let root = snap_path.parent().unwrap();
+        let pussy = embedded("pussy").unwrap();
+        assert!(pussy.pinned());
+        assert!(!embedded("bostrom").unwrap().pinned());
+
+        let toml_text = std::fs::read_to_string(root.join("chain-genesis.toml")).unwrap();
+        let table: toml::Table = toml_text.parse().unwrap();
+        let sect = table["pussy"].as_table().unwrap();
+        assert_eq!(pussy.chain_id, unhex(sect["particle"].as_str().unwrap()));
+        assert_eq!(pussy.genesis_block, unhex(sect["block0_id"].as_str().unwrap()));
+
+        let snap = std::fs::read_to_string(&snap_path).unwrap();
+        let entries = crate::chain::conformance::parse(&snap);
+        let find = |scenario: &str| entries.iter().find(|e| e.key == "chain::genesis@v1" && e.scenario == scenario).unwrap().value;
+        assert_eq!(pussy.chain_id, find("pussy particle"));
+        assert_eq!(pussy.genesis_block, find("pussy block0_id"));
+    }
 
     #[test]
     fn subsidy_is_one_percent_per_year_floored() {

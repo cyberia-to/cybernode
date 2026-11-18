@@ -1,20 +1,24 @@
 //! One chain node: the consensus kernel behind [`ChainView`]
 //! ([`KernelChain`]), its mempool and the wire, served over the HTTP adapter
-//! (chain_routes.rs). Mining is a separate process: `soft3 mine --node URL`
+//! (chain_routes.rs). Mining is a separate process: `cybernode mine --node URL`
 //! speaks `/template` and `/submit` (chain-wire §7).
-//! `soft3 node --chain <name> --home DIR --bind HOST:PORT --radio HOST:UDP
-//! --peers FILE --moniker NAME` (deploy/chain/soft3-chain@.service).
+//! `cybernode node --chain <name> --home DIR --bind HOST:PORT --radio HOST:UDP
+//! --peers FILE --moniker NAME` (deploy/chain/cybernode@.service).
 
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::chain::engine::OpenOptions;
+use crate::chain::header::hash32;
 use crate::chain::net::chain_view::{BlockVerdict, ChainView};
 use crate::chain::net::codec::{hex, Header, Id};
 use crate::chain::net::kernel::KernelChain;
 use crate::chain::net::mempool::Mempool;
 use crate::chain::net::{discovery, Config, Net};
+use crate::chain::params::EpochClock;
+use crate::chain::revert::RevertEntry;
 
 /// Chains this binary launches; their genesis files are not embedded yet
 /// (the pipeline of chain.md §4.2 is the kernel's), so `--genesis` is required.
@@ -41,6 +45,8 @@ pub struct ChainOpts {
     pub log_net: bool,
     /// `--corpus DIR`: record every block given to the kernel (chain/corpus.rs)
     pub corpus: Option<PathBuf>,
+    /// `--revert` rehearsal entries (chain.md §5.6), added to the compiled table
+    pub reverts: Vec<RevertEntry>,
 }
 
 pub struct ChainNode {
@@ -74,21 +80,49 @@ pub fn endpoint_id(home: &Path) -> io::Result<String> {
 
 impl ChainNode {
     pub fn open(opts: ChainOpts) -> io::Result<Arc<ChainNode>> {
-        std::fs::create_dir_all(&opts.home)?;
+        let pin = crate::chain::params::embedded(&opts.chain).filter(|c| c.pinned());
         let genesis_path = opts.genesis.clone().unwrap_or_else(|| opts.home.join("genesis.tade"));
         let genesis_bytes = match std::fs::read(&genesis_path) {
             Ok(bytes) => bytes,
             Err(_) if LAUNCH_CHAINS.contains(&opts.chain.as_str()) => {
-                return Err(io::Error::other(format!(
-                    "the {} genesis is not embedded in this build yet; pass --genesis <file> (chain.md §4.2 pipeline)", opts.chain
-                )));
+                return Err(io::Error::other(match pin {
+                    Some(pin) => format!(
+                        "the {} genesis file is still passed by hand (--genesis <file>, or {}); it must have particle {}",
+                        opts.chain, opts.home.join("genesis.tade").display(), hex(&pin.chain_id)
+                    ),
+                    None => format!(
+                        "the {} genesis is not embedded in this build yet; pass --genesis <file> (chain.md §4.2 pipeline)", opts.chain
+                    ),
+                }));
             }
             Err(e) => return Err(io::Error::other(format!("genesis {}: {e}", genesis_path.display()))),
         };
+        // a pinned chain boots only the blessed file: checked before anything is written
+        if let Some(pin) = pin {
+            let particle = hash32(&genesis_bytes);
+            if particle != pin.chain_id {
+                return Err(io::Error::other(format!(
+                    "--chain {}: genesis file {} has particle {} but this build pins {} (conformance/chain-genesis.toml)",
+                    opts.chain, genesis_path.display(), hex(&particle), hex(&pin.chain_id)
+                )));
+            }
+        }
+        std::fs::create_dir_all(&opts.home)?;
         if opts.genesis.is_some() && !opts.home.join("genesis.tade").exists() {
             std::fs::write(opts.home.join("genesis.tade"), &genesis_bytes)?;
         }
-        let kernel = Arc::new(KernelChain::open(&genesis_bytes, &opts.home).map_err(io::Error::other)?);
+        // as `KernelChain::open` (checkpoints on, the env epoch clock), plus the rehearsal reverts
+        let open_opts = OpenOptions { checkpoints: true, clock: EpochClock::from_env(), reverts: opts.reverts.clone(), ..Default::default() };
+        let kernel = Arc::new(KernelChain::open_with(&genesis_bytes, &opts.home, open_opts).map_err(io::Error::other)?);
+        if let Some(pin) = pin {
+            let block0 = kernel.genesis_id();
+            if block0 != pin.genesis_block {
+                return Err(io::Error::other(format!(
+                    "--chain {}: this build computes block 0 {} from the pinned genesis but pins {} (conformance/chain-genesis.toml); the state rules drifted from the blessed root",
+                    opts.chain, hex(&block0), hex(&pin.genesis_block)
+                )));
+            }
+        }
         if let Some(dir) = &opts.corpus {
             kernel.record_corpus(dir)?;
         }
@@ -99,12 +133,21 @@ impl ChainNode {
         let dev = !LAUNCH_CHAINS.contains(&name.as_str());
         let chain: Arc<dyn ChainView> = kernel.clone();
         let mempool = Arc::new(Mutex::new(Mempool::new()));
+        // chain.md §5.6: the transactions a revert retracted at open go back to the
+        // mempool in their original block order, each only if still valid on the new tip
+        let retracted = kernel.take_retracted_txs();
+        if !retracted.is_empty() {
+            let now = crate::chain::net::now_unix();
+            let mut pool = mempool.lock().expect("mempool");
+            let kept = retracted.iter().filter(|raw| pool.admit(raw, &*chain, now).is_ok()).count();
+            eprintln!("  revert: {} of {} retracted transactions re-admitted to the mempool", kept, retracted.len());
+        }
         let bootstrap = match &opts.peers {
             Some(path) => {
                 let text = std::fs::read_to_string(path)?;
                 let (peers, skipped) = discovery::parse_peers(&text, &name).map_err(io::Error::other)?;
                 for s in skipped {
-                    eprintln!("  peers: {s:?} has no endpoint id — skipped (QUIC dials need the id; `soft3 node id`)");
+                    eprintln!("  peers: {s:?} has no endpoint id — skipped (QUIC dials need the id; `cybernode node id`)");
                 }
                 peers
             }
@@ -171,6 +214,7 @@ impl ChainNode {
             field("epoch"), field("next_boundary"), field("last_settled"), field("focus_bps"), field("pool"), field("active_stake"),
             field("total_stake"), field("stake_keys_match"), field("settlement_ok"), field("engine").trim_matches('"'),
         );
+        let revert = self.kernel.revert_status();
         let status = format!(
             "---\nparticle: status\nchain: {}\nprotocol: soft3/chain/1\nrule-set: {}\nactivations: 1@0\nengine: chain+cybergraph+bbg\nversion: {}\nmoniker: {}\nheight: {}\ntip: {}\nchainwork: {}\nbits: {:#010x}\nnext-bits: {:#010x}\ngenesis: {}\ngenesis-block: {}\ngenesis-time: {}\nbbg-root: {}\nsupply: {}\nconserved: {}\nsubsidy: {}\nneurons: {}\nparticles: {}\naxons: {}\nmempool: {}\npeers: {}\noutbound: {}\nbest-header: {}\ncheckpoint: {}\nfinalized: {}\ncatching-up: {}\nmining: {}\nstorage: bbg-fjall\nendpoint: {}\n---\nthe state of [[{}]] at height {}\n",
             self.chain_name, self.chain.rule_set(), env!("CARGO_PKG_VERSION"), self.moniker.replace(['\n', '\r'], " "),
@@ -180,9 +224,12 @@ impl ChainNode {
             best.height, checkpoint, self.kernel.finalized_height(), self.net.catching_up(), self.mining(), hex(self.net.id().as_bytes()),
             self.chain_name, tip.height,
         );
-        // the economy's fields go before the closing front-matter fence
+        // the activation table carries the revert entries (chain.md §7.1, §5.6); `1@0` when none
+        let status = status.replacen("activations: 1@0\n", &format!("activations: {}\n", revert.activations), 1);
+        let revert_fields = revert.lines();
+        // the economy's and the revert fields go before the closing front-matter fence
         match status.split_once("storage: bbg-fjall\n") {
-            Some((head, tail)) => format!("{head}{economy}storage: bbg-fjall\n{tail}"),
+            Some((head, tail)) => format!("{head}{economy}{revert_fields}storage: bbg-fjall\n{tail}"),
             None => status,
         }
     }
