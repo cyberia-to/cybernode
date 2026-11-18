@@ -40,7 +40,9 @@ impl ChainApi for Chain {
             tip: tip.id,
             chainwork: tip.chainwork,
             bits: tip.header.bits,
-            next_bits: self.bits_after(&tip.header),
+            // 0 when a revert anchor's ancestor is missing: /status says so
+            // plainly rather than printing a target this node alone computes
+            next_bits: self.bits_after(&tip.header).unwrap_or(0),
             genesis_block: self.store.main_at(0).unwrap_or([0; 32]),
             genesis_time: self.genesis.params().time,
             state_root: tip.header.state_root,

@@ -18,6 +18,7 @@ pub mod economy;
 pub mod economy_api;
 pub mod engine;
 pub mod engine_api;
+pub mod engine_revert;
 pub mod engine_tx;
 pub mod genesis;
 pub mod header;

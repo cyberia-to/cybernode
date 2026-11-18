@@ -210,7 +210,7 @@ pub fn header_template(chain: &mut Chain, to: Id, time: u64, mempool: &[Vec<u8>]
     let state_root = applied.root;
     chain.state_mut().revert(&applied.undo);
 
-    let bits = chain.bits_after(&parent);
+    let bits = chain.bits_after(&parent).ok_or_else(|| ChainError::Store("revert anchor: no ancestor of the tip on its branch".into()))?;
     let header = Header {
         version: u32::from(chain.rule_set_for(height)),
         height,

@@ -101,19 +101,21 @@ pub struct ReAnchor {
 /// `ideal = (h − H − 2)·T`, anchor target = target(bits_{H+1}) where
 /// `bits_{H+1}` is this same function applied to the parent at `H` (with the
 /// earlier entries). With no entry below the parent it is [`next_bits`].
-pub fn next_bits_reverted(anchor: Anchor, reanchors: &[ReAnchor], parent: &Header, ancestor: &dyn Fn(u64) -> Option<Header>) -> u32 {
+///
+/// `None` when the anchor's ancestor is not resolved, or its bits do not
+/// decode: an archival node (§3.6) always resolves it, and answering with
+/// the un-anchored [`next_bits`] instead would make a consensus value depend
+/// on what this node happens to hold — two stores, two expected `bits`, no
+/// error. The caller refuses the header instead.
+pub fn next_bits_reverted(anchor: Anchor, reanchors: &[ReAnchor], parent: &Header, ancestor: &dyn Fn(u64) -> Option<Header>) -> Option<u32> {
     let Some(i) = reanchors.iter().rposition(|r| r.height < parent.height) else {
-        return next_bits(anchor, parent);
+        return Some(next_bits(anchor, parent));
     };
     let r = reanchors[i];
-    let Some(base_parent) = ancestor(r.height) else {
-        return next_bits(anchor, parent);
-    };
-    let base_bits = next_bits_reverted(anchor, &reanchors[..i], &base_parent, ancestor);
-    let Ok(target) = decode_bits(base_bits) else {
-        return next_bits(anchor, parent);
-    };
-    asert_ideal(Anchor { target, time: r.anchor_time }, parent.height - r.height - 1, parent.time).bits
+    let base_parent = ancestor(r.height)?;
+    let base_bits = next_bits_reverted(anchor, &reanchors[..i], &base_parent, ancestor)?;
+    let target = decode_bits(base_bits).ok()?;
+    Some(asert_ideal(Anchor { target, time: r.anchor_time }, parent.height - r.height - 1, parent.time).bits)
 }
 
 /// Median time past of the last `MTP_WINDOW` headers (§1.4): `times` holds

@@ -274,22 +274,26 @@ fn asert_reanchors_above_an_entry_in_the_function() {
     let first = daa::next_bits(anchor, &parent_h);
     assert_eq!(first, 0x1d10_0000);
     // the block at H + 1 is plain §1.5 from the parent at H
-    assert_eq!(daa::next_bits_reverted(anchor, &reanchors, &parent_h, &ancestor), first);
+    assert_eq!(daa::next_bits_reverted(anchor, &reanchors, &parent_h, &ancestor).unwrap(), first);
     // the block at H + 2, parent at H + 1 stamped at the anchor: Δt = 0, ideal = 0
     let parent_11 = header_at(11, 10_000);
-    assert_eq!(daa::next_bits_reverted(anchor, &reanchors, &parent_11, &ancestor), first);
+    assert_eq!(daa::next_bits_reverted(anchor, &reanchors, &parent_11, &ancestor).unwrap(), first);
     // the genesis anchor would see days of drift and climb to POW_LIMIT
     assert_eq!(daa::next_bits(anchor, &parent_11), 0x1e10_0000);
     // one interval later and on schedule (ideal = 30 s): still the anchor target
     let on_time = header_at(12, 10_030);
-    assert_eq!(daa::next_bits_reverted(anchor, &reanchors, &on_time, &ancestor), first);
+    assert_eq!(daa::next_bits_reverted(anchor, &reanchors, &on_time, &ancestor).unwrap(), first);
     // 30 s late against the ideal: the target rises
     let late = header_at(12, 10_060);
-    let late_bits = daa::next_bits_reverted(anchor, &reanchors, &late, &ancestor);
+    let late_bits = daa::next_bits_reverted(anchor, &reanchors, &late, &ancestor).unwrap();
     assert!(decode_bits(late_bits).unwrap() > decode_bits(first).unwrap());
     // no entry below the parent, or no entries at all: exactly §1.5
-    assert_eq!(daa::next_bits_reverted(anchor, &[], &late, &ancestor), daa::next_bits(anchor, &late));
-    assert_eq!(daa::next_bits_reverted(anchor, &reanchors, &header_at(9, 270), &ancestor), daa::next_bits(anchor, &header_at(9, 270)));
+    assert_eq!(daa::next_bits_reverted(anchor, &[], &late, &ancestor).unwrap(), daa::next_bits(anchor, &late));
+    assert_eq!(daa::next_bits_reverted(anchor, &reanchors, &header_at(9, 270), &ancestor).unwrap(), daa::next_bits(anchor, &header_at(9, 270)));
+    // the ancestor of the anchor unresolved: no answer at all, never the
+    // un-anchored one — the expected bits must not depend on this store
+    let no_ancestor = |_: u64| -> Option<Header> { None };
+    assert_eq!(daa::next_bits_reverted(anchor, &reanchors, &parent_11, &no_ancestor), None);
     // a second entry anchors on the first one's result
     let second = [ReAnchor { height: 10, anchor_time: 10_000 }, ReAnchor { height: 12, anchor_time: 20_000 }];
     let parent_12 = header_at(12, 10_090);
@@ -298,9 +302,9 @@ fn asert_reanchors_above_an_entry_in_the_function() {
         12 => Some(parent_12),
         _ => None,
     };
-    let base_12 = daa::next_bits_reverted(anchor, &second[..1], &parent_12, &anc2); // bits of block 13 under entry one alone
+    let base_12 = daa::next_bits_reverted(anchor, &second[..1], &parent_12, &anc2).unwrap(); // bits of block 13 under entry one alone
     let parent_13 = header_at(13, 20_000);
-    assert_eq!(daa::next_bits_reverted(anchor, &second, &parent_13, &anc2), base_12);
+    assert_eq!(daa::next_bits_reverted(anchor, &second, &parent_13, &anc2).unwrap(), base_12);
 }
 
 #[test]
