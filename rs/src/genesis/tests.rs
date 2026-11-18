@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use super::derive::{OwnerKind, legacy_owner, module_address, particle_of_cid};
 use super::file::{self, Balance, GenesisFile, Link, Params};
 use super::pool;
-use super::{BOSTROM, Chain, Options, PUSSY, PUSSY_RC, build, hash32, hex, state, token_of, unhex, verify};
+use super::{BOSTROM, Chain, OWNER_KEY, Options, PUSSY, PUSSY_RC, build, hash32, hex, state, token_of, unhex, verify};
 
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join("cyber")
@@ -122,6 +122,28 @@ fn genesis_file_round_trips_and_is_strict() {
 }
 
 #[test]
+fn owner_key_is_the_owners_and_on_pussy_only() {
+    assert_eq!(hex(&OWNER_KEY), "0354814b25ec4214b782b48b0d4cd562331f43ce77513f5ca0dd4414096959f473");
+    assert_eq!(
+        hex(&crate::wallet::tx::neuron_of(&OWNER_KEY)),
+        "3c51813c79349f501a1b6fe0dc84af204980d3c8a70622b812655bbcab171292"
+    );
+    assert_eq!(PUSSY.checkpoint_key, OWNER_KEY);
+    assert_eq!(PUSSY_RC.checkpoint_key, OWNER_KEY);
+    assert_eq!(BOSTROM.checkpoint_key, [0; 33]);
+}
+
+#[test]
+fn the_key_is_written_into_the_file_and_read_back() {
+    let mut g = sample();
+    let zero = hash32(&g.encode().unwrap());
+    g.params.checkpoint_key = OWNER_KEY;
+    let bytes = g.encode().unwrap();
+    assert_eq!(GenesisFile::decode(&bytes).unwrap().params.checkpoint_key, OWNER_KEY);
+    assert_ne!(hash32(&bytes), zero, "the chain id commits to the key");
+}
+
+#[test]
 fn conformance_net_genesis_of_section_8() {
     // one `b` frame (owner 0x66 × 32, token("pussy"), 1,000,000), no links
     let g = sample();
@@ -182,6 +204,8 @@ fn pussy_genesis_is_deterministic_conserving_and_bijective() {
     assert_eq!(v.particle, ra.particle);
     assert_eq!(v.state_root, ra.state_root);
     assert_eq!(v.block0_id, ra.block0_id);
+    assert_eq!(ra.checkpoint_key, hex(&OWNER_KEY));
+    assert_eq!(v.checkpoint_key, hex(&OWNER_KEY));
 
     let bytes = std::fs::read(&a).unwrap();
     let g = GenesisFile::decode(&bytes).unwrap();
@@ -293,6 +317,8 @@ fn pussy_rc_genesis_is_pussy_state_under_its_own_name() {
     assert_eq!(a.particle, b.particle);
     assert_ne!(a.particle, p.particle, "the name is in the p frame: the chain ids differ");
     assert_eq!(a.chain, "pussy-rc");
+    assert_eq!(a.checkpoint_key, hex(&OWNER_KEY));
+    assert_eq!(p.checkpoint_key, hex(&OWNER_KEY));
 
     let g = GenesisFile::decode(&std::fs::read(dir.join("a.tade")).unwrap()).unwrap();
     let gp = GenesisFile::decode(&std::fs::read(dir.join("p.tade")).unwrap()).unwrap();
