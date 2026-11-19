@@ -30,6 +30,7 @@ lowercase, bytes in wire order.
 | `"boot"` (= `token("boot")`) | `1d443e1103abbd0aebe4abaf3fadc203160a471e9accb9b6e0a73804ea785b3b` |
 | `"pussy"` (= `token("pussy")`) | `87a70ff9ed0638fc9fafb1a30f57c5ad2ebe5155c48702c50bdbb2ece87f6a71` |
 | 168 zero bytes | `355fd03315a5ceb056cda53d11ff7b9755167182d59ff9e31134d69d33bdf0f6` |
+| 200 zero bytes | `36b3f2d067dc97c244ef8168a5b0ffe467eb1c605b7b93d2f5d012be0f4103f0` |
 
 The harness fails if any of these moves: it means hemera itself changed,
 and every id below with it.
@@ -40,8 +41,10 @@ Decode and canonical-encode (chain.md §1.3):
 
 | bits | target | verdict |
 |---|---|---|
-| `0x1e010000` | 2^232 | canonical; `GENESIS_BITS` |
-| `0x1e100000` | 2^236 | canonical; `POW_LIMIT` |
+| `0x20020000` | 2^249 | canonical; pussy `GENESIS_BITS` |
+| `0x20100000` | 2^252 | canonical; `POW_LIMIT`, bostrom `GENESIS_BITS` |
+| `0x1e010000` | 2^232 | canonical |
+| `0x1e100000` | 2^236 | canonical |
 | `0x1d100000` | 2^228 | canonical |
 | `0x1d200000` | 2^229 | canonical |
 | `0x1d080000` | 2^227 | canonical |
@@ -52,7 +55,8 @@ Decode and canonical-encode (chain.md §1.3):
 | `0x01003456` | 0 | reject: target 0 |
 | `0x1d800000` | — | reject: sign bit |
 | `0x00000000` | 0 | reject: target 0 |
-| `0x1f010000` | 2^240 | reject: above `POW_LIMIT` |
+| `0x1f010000` | 2^240 | canonical |
+| `0x20200000` | 2^253 | reject: above `POW_LIMIT` |
 
 ## 3. work
 
@@ -63,15 +67,18 @@ Decode and canonical-encode (chain.md §1.3):
 | 2^228 | 268,435,455 |
 | 2^232 | 16,777,215 |
 | 2^236 | 1,048,575 |
+| 2^249 | 127 |
+| 2^252 | 15 |
 | 1 | 2^255 |
 
-Chainwork is the u256 sum; the harness checks a 3-block chain at
-`GENESIS_BITS`: `3 · 16,777,215 = 50,331,645`.
+Chainwork is the u256 sum; the harness checks a 3-block chain at pussy's
+`GENESIS_BITS`: `3 · 127 = 381`.
 
 ## 4. ASERT
 
 Test anchor `genesis_target = 2^228` (a test net value; the real chains
-anchor at `GENESIS_BITS` = 2^232 and the formula is the same), `T = 30`,
+anchor at their `GENESIS_BITS` — pussy 2^249, bostrom 2^252 — and the
+formula is the same), `T = 30`,
 `H = 600`, `genesis.time = 0` (chain.md §1.5). Inputs are the parent's
 height and time; outputs the exact intermediate values and the next block's
 bits.
@@ -83,10 +90,10 @@ bits.
 | 19 | 1170 | 65536 | 1 | 0 | 65536 | 2^229 | `0x1d200000` |
 | 100 | 2400 | −65536 | −1 | 0 | 65536 | 2^227 | `0x1d080000` |
 | 19 | 0 | −62260 | −1 | 3276 | 67852 | `0x084860 · 256^26` | `0x1d084860` |
-| 5 | 1,000,000 | 109210282 | 1666 | 27306 | 87473 | 2^236 (clamped) | `0x1e100000` |
+| 5 | 1,000,000 | 109210282 | 1666 | 27306 | 87473 | 2^252 (clamped) | `0x20100000` |
 
 Row 5 pins floor division toward −∞ (`e = −62260`, not −62259) and the
-cubic (`factor = 67852`); row 6 pins the clamp at `POW_LIMIT` = 2^236 under
+cubic (`factor = 67852`); row 6 pins the clamp at `POW_LIMIT` = 2^252 under
 a shift far beyond 256. An implementation using floating point will fail row 5 at
 `factor`.
 
@@ -102,41 +109,45 @@ Test header (not a chain block; `chain = 0x44 × 32`):
 
 ```
 version 1, height 1, time 1762349000, bits 0x1d100000, nonce 0,
-prev 0x11×32, tx_root 0x22×32, state_root 0x33×32, chain 0x44×32
+prev 0x11×32, tx_root 0x22×32, state_root 0x33×32, chain 0x44×32,
+sample 0x55×32
 ```
 
-bytes:
+bytes (200):
 
 ```
 01000000 0100000000000000 c84f0b6900000000 0000101d
 00000000000000000000000000000000
-1111…11 (32) 2222…22 (32) 3333…33 (32) 4444…44 (32)
+1111…11 (32) 2222…22 (32) 3333…33 (32) 4444…44 (32) 5555…55 (32)
 ```
 
-`block_id = bdd7f2ef3a5a1c573b8d84a7a2aeedc95c6f8aa2139eea5c83946b33c4180c31`.
-It does not satisfy its own target (byte 31 is `0x31`), which the harness
-asserts: `valid_pow == false`.
+`block_id = c5db04fea97b4042d6296a43284b5ed33a18a7538afee182c275ec5712e2d60c`
+over the 200 bytes. The first 168 bytes are the template the sample is drawn
+from (chain.md §1.1, §1.2); their hemera digest
+`bdd7f2ef3a5a1c573b8d84a7a2aeedc95c6f8aa2139eea5c83946b33c4180c31` stays a
+blessed anchor — it is the template digest now, not a block id. The header
+does not satisfy its own target: byte 31 of the id is `0x0c`, so the
+little-endian integer is far above 2^228, which the harness asserts
+(`valid_pow == false`). Height 0 is exempt (`valid_pow == true` for the same
+header at height 0).
 
-PoW-valid header at `GENESIS_BITS`: the header above with
-`bits = 0x1e010000`, `time = 1793885850`, re-mined 2026-10-16 under hemera
-0.4 by a linear nonce search from 0 with the chain's own path (`Header::id`
-= `hemera::hash` over the 168 bytes, `valid_pow`): 934,637 hashes, 10.4 s
-at 90.3 kH/s on one M4 Max core of a shared machine — the measurement
-behind chain.md §1.2 (the 0.3 vector was nonce 40,165,933: 623 s at
-64.4 kH/s):
+Work in attempts (§3): at pussy's `GENESIS_BITS` the header's work is 127
+and three such headers chain to 381.
 
-```
-nonce (u128 LE) = 934636 = ec420e0000000000 0000000000000000
-header = 01000000 0100000000000000 9a86ec6a00000000 0000011e ec420e000000000000000000000000000000 1111…11 2222…22 3333…33 4444…44
-block_id = a3dc0cdb7c69e1d4986c388effe1612613b1b71f2c2ca49084bc0730da000000
-```
+A block id that passes the target is only half of the test: the sample of
+chain.md §1.2 is checked at validation step 8 against the game the parent
+state fixes, so a target-passing header with a wrong `sample` is invalid.
+The harness mines that pair on its own test net rather than from a pinned
+nonce — the digest depends on the staked graph, the beacon and the cluster,
+not on hemera alone — and asserts: a mined header is accepted; the same
+header with `sample` altered in one byte is refused at step 8 and its sender
+scored +100; a forged chain above the tip costs one branch attempt per
+interval. The 2026-10-16 grinding figures (934,637 hashes at 90.3 kH/s over
+168 bytes) measured hemera, not a ticket, and are retired as a header
+vector: the chain's work is a sample, and chain.md §1.2 carries the sample
+costs instead.
 
-`valid_pow == true` (bytes 29–31 are zero, so the LE integer is below
-2^232); the harness also asserts the same header is rejected at
-`bits = 0x1d100000` (2^228 needs byte 28 below 0x10; it is `0xda`), and that
-nonce 934,635 fails.
-
-Decode rules: 167 or 169 bytes → error; `version & 0xffff != 1` → error;
+Decode rules: 199 or 201 bytes → error; `version & 0xffff != 1` → error;
 `chain` mismatch → error (wrong chain, not malformed).
 
 ## 6. transactions
@@ -393,7 +404,14 @@ defined in chain-economy §10 (amended 2026-10-17: `GROUND` 1/4,
 | mark decay, H = 1,000,000, S = 0: after 1 epoch, after 360 | 998,077; 500,047 |
 | budget 1,000, x = [1, 1, 1] | pay [333, 333, 333]; 1 stays in the pool |
 | budget 10⁶, x = [3, 1], Δs = [10⁶, 10⁹] | caps [10,000, 10⁷]; pay [10,000, 250,000]; 740,000 stays |
-| `epoch(240)`, `epoch(241)`, `settle(1)` | 1, 2, 360 |
+| `epoch(240)`, `epoch(241)`, `settle(1)` | 1, 2, 600 |
+
+Of the settlement lottery (chain-economy §5.6, §7.1): `cluster(E)` of a
+fixed two-player list — two known cards with sides +1 and −1, the `0x01`
+and `0xff` bytes of the preimage — and of the empty game (`N = 0`,
+`hemera(D_CLUSTER ‖ 0u32)`); the 218-byte epoch record of the 2-epoch chain
+with its four lottery fields (`players`, `samples`, `by_mean`, `value`);
+and a ticket of the test net's game with its `sample` digest.
 
 `blessed`: the transaction vectors of kinds 2 (with stake), 6 and 7; the
 genesis weights of the conformance genesis and of pussy's genesis file;

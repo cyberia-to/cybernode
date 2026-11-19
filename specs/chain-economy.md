@@ -23,16 +23,21 @@ rest of the subsidy and all fees.
 
 Binding decisions (coordinator, 2026-10-17), the contract of this page:
 
-1. block ordering stays Nakamoto proof of work (chain.md §1, §5);
+1. block ordering stays Nakamoto proof of work whose work is the settlement
+   sample of rewards.md §7: the id of a header carrying one Shapley sample
+   of the last closed epoch's game, below target (chain.md §1.2, §5);
 2. an epoch is a fixed number of blocks; the epoch beacon is the id of the
    epoch's boundary block; the boundary is a consensus object (closes
    cyber/launch row 41; foculus's sequential-squaring VDF is retired from
    the root chain);
 3. one φ*: tru's fixed-point tri-kernel; `foculus::phi` is retired;
-4. epoch settlement is verified by recomputation on every full node, no
-   proof on the critical path; attribution of Δφ⁺ to links is the gradient
-   (integrated-gradient) form of Shapley of tru/specs/rewards.md §4,
-   computed by one adjoint solve, never by per-contributor recomputes;
+4. epoch settlement and every block's sample are verified by recomputation
+   on every full node, no proof on the critical path; attribution of Δφ⁺ to
+   links is the gradient (integrated-gradient) form of Shapley of
+   tru/specs/rewards.md §4, computed by one adjoint solve; the block's work
+   is one Shapley sample of the same game — the marginals of a 64-rank
+   window of one ordering, one cold solve each, recomputed by every node
+   (rewards.md §7, tru#46);
 5. a cyberlink carries a locked stake (conviction) and a valence
    v ∈ {−1, 0, +1}; only staked links earn;
 6. everything on this page is active from genesis: no shadow mode, one rule
@@ -71,6 +76,9 @@ are chain.md §0.
 | `SETTLE_BUDGET` | 900 | seconds of reference settlement compute | §7.2 |
 | `RHO_LAUNCH` | 1 | surprise weight of every active position | §5.4 |
 | `KARMA_LAUNCH` | 1 | karma multiplier of every neuron | §3.7 |
+| `W_TICKET` | pussy 64, bostrom 2 | entries of a ticket: `max(2, 2^⌊log2(2.5 s / t_solve)⌋)` (rewards.md §7) | §7.1 |
+| `K_MIN` | 64 | samples a player needs to be paid by its mean (§5.2) | §5.2 |
+| `K_BLOCK` | 0 | folded tickets per block beyond its own (§7.3) | §7.3 |
 
 Derived, pussy (`S0` = 1,099,389,810,279,114,036, `SUBSIDY` =
 10,458,426,657) and bostrom (`S0` = 482,287,925,778,234, `SUBSIDY` =
@@ -84,7 +92,7 @@ focus pool per epoch at the cap `240 · floor(SUBSIDY / 2)`.
 | foculus — the epoch clock | the boundary is a block, the beacon is its id (§2) | convergence finality (φ*ᵢ > τ) stays outside the root chain; ordering is Nakamoto |
 | tru — φ* | computed by every full node at every boundary over the staked graph (§4) | karma, market price and will enter `A_eff` with the reports rule set (§7.4) |
 | staking with valence | kinds 2, 6, 7: lock with a link, unlock, payout owner (§3) | slashing by BTS redistribution with the reports rule set |
-| settlement mining | settlement by recomputation on every node; mining is PoW block production (§7.1) | the ticket lottery and fold, by scheduled fork when recompute stops fitting (§7.3) |
+| settlement mining | the block's work is a Shapley sample of the last closed epoch's game (§7.1, rewards.md §7); settlement pays each player the mean of its sampled marginals, capped and floored by the exact value every node recomputes (§5.2); every sample recomputed | the accumulator admits K_BLOCK folded tickets per block when the epoch engine has a proof relation and the fold is constant size (§7.3, rewards.md §7) |
 | emission | subsidy split between miners and the focus pool by `θ^½` (§6) | PID control of the split and the floor (rewards.md §10) |
 | privacy | none; the pool's formats are frozen (chain.md §11) | rule set 2 when its gates pass |
 
@@ -116,10 +124,11 @@ copy (launch row 41's gate, met by construction).
 of force:
 
 - observability: the chain launches on 2026-11-05 and the economy has to
-  be seen working that day — the first payout lands at height 360, about
-  three hours after genesis, and twelve settlements a day give a red team
-  twelve chances a day to break one;
-- pipeline: settlement of epoch E is applied at `boundary(E) + D`
+  be seen working that day — the first payout — of epoch 1's game, sampled
+  by the blocks of epoch 2 — lands at height 600, about five hours after
+  genesis, and twelve settlements a day give a red team twelve chances a day
+  to break one;
+- pipeline: settlement of epoch E is applied at `boundary(E + 1) + D`
   (§2.5); `L ≥ D + 1` keeps at most one settlement in flight, so a node
   never computes two epochs at once;
 - cost: a settlement is three tri-kernel solves over the whole graph
@@ -145,15 +154,15 @@ unrelated to this clock.
 beacon(E) = block_id(boundary(E))         // chain.md §1.1, 32 bytes
 ```
 
-The beacon is the hash of the boundary block, nothing else. At genesis no
-rule reads it: settlement by recomputation (§5) is deterministic and needs
-no randomness. It is recorded in the epoch record (§5.6) and is the seed of
-the ticket rule set (§7.3), where its one weakness matters: the miner of a
-boundary block can withhold a found block to draw another beacon, paying the
-block's reward per draw. That bias is bounded by the subsidy and is
-accepted for the ticket rule set's orderings, which are only sampling
-seeds; nothing that pays a winner takes its randomness from a single
-beacon.
+The beacon is the hash of the boundary block, nothing else. Every block of
+epoch E + 1 reads it: it seeds the block's sample (rewards.md §7) with the
+cluster and the template's digest. It is recorded in the epoch record
+(§5.6). Its one weakness: the miner of a boundary block can withhold a found
+block to draw another beacon, paying the block's reward per draw. That bias
+buys a different sample set, whose effect on any player's mean is bounded by
+the redrawer's share of the window's tickets like every bias of rewards.md
+§7, and is zero-sum under the rescaling to `v(N)`; nothing that pays a
+winner takes its randomness from a single beacon.
 
 ### 2.4 the snapshot
 
@@ -177,27 +186,31 @@ Settlement of epoch E ≥ 1 is a step of the state transition of the block
 at height
 
 ```
-settle(E) = boundary(E) + D          // D = FINALITY_DEPTH = 120
+settle(E) = boundary(E + 1) + D      // D = FINALITY_DEPTH = 120: the window
+                                     // of E's tickets is epoch E + 1
+                                     // (rewards.md §7)
 ```
 
-- When `settle(E)` is applied, `boundary(E)` is 120 deep; by chain.md §5.2
-  no node that saw it in time reorganizes below it, so the snapshots
-  `G_{E−1}` and `G_E` are final.
+- When `settle(E)` is applied, `boundary(E + 1)` is 120 deep; by chain.md
+  §5.2 no node that saw it in time reorganizes below it, so the snapshots
+  `G_{E−1}` and `G_E` are final and so is the window of tickets that sampled
+  E's game.
 - Everything settlement reads is a function of the two final snapshots
   and of the pool balance at `settle(E)`, and the pool balance is itself a
   function of height once the boundary is final (§6.2). A reorganization
   that replaces the block at `settle(E)` (or any block after the boundary)
   therefore reproduces the same payouts at the same height; payouts are
   spendable at once and need no maturity.
-- A reorganization that replaces the boundary block itself (fewer than
-  120 blocks deep) replaces the snapshot; nodes compute settlement for the
-  boundary on their best chain and recompute when it changes. Each
+- A reorganization that replaces the boundary block of E, or any block of
+  the ticket window `(boundary(E), boundary(E + 1)]` (fewer than 120 blocks
+  deep), replaces the snapshot or the sample set; nodes compute settlement
+  for the window on their best chain and recompute when it changes. Each
   candidate boundary costs its miner a valid block; the recompute is
   bounded by §7.2.
-- A node starts computing at the boundary and has D blocks (one hour) to
-  finish. A node that has not finished cannot validate `settle(E)` and
-  waits; a miner that has not finished cannot build it. This is the
-  liveness bound, and §7.2 is the margin.
+- A node starts computing when the window closes at `boundary(E + 1)` and
+  has D blocks (one hour) to finish. A node that has not finished cannot
+  validate `settle(E)` and waits; a miner that has not finished cannot build
+  it. This is the liveness bound, and §7.2 is the margin.
 
 ## 3. positions: staked cyberlinks
 
@@ -231,6 +244,10 @@ chain.md:
 | `D_EPOCH` | `soft3/chain/epoch/v1\0` | 21 | `736f6674332f636861696e2f65706f63682f763100` |
 | `D_PAYOUT_LEAF` | `soft3/chain/payout-leaf/v1\0` | 27 | `736f6674332f636861696e2f7061796f75742d6c6561662f763100` |
 | `D_PAYOUT_NODE` | `soft3/chain/payout-node/v1\0` | 27 | `736f6674332f636861696e2f7061796f75742d6e6f64652f763100` |
+| `D_ORDER` | `soft3/chain/order/v1\0` | 21 | `736f6674332f636861696e2f6f726465722f763100` |
+| `D_PROBE` | `soft3/chain/probe/v1\0` | 21 | `736f6674332f636861696e2f70726f62652f763100` |
+| `D_SAMPLE` | `soft3/chain/sample/v1\0` | 22 | `736f6674332f636861696e2f73616d706c652f763100` |
+| `D_CLUSTER` | `soft3/chain/cluster/v1\0` | 23 | `736f6674332f636861696e2f636c75737465722f763100` |
 
 ### 3.2 the card record
 
@@ -303,8 +320,9 @@ they were credited to the payout owner at settlement and are ordinary
 balances. What an unlock gives up is future credit, through the high-water
 mark of §5.3.
 
-`MIN_LOCK = 20,160` blocks (seven days). It must be at least `L + D` so a
-position increased in epoch E is still locked at `settle(E)` (§5.4); seven
+`MIN_LOCK = 20,160` blocks (seven days). It must be at least `2L + D` so a
+position increased in epoch E is still locked at `settle(E) = boundary(E +
+1) + D` (§5.4); 20,160 is 33 times that; seven
 days makes the lock a costly signal — conviction — rather than a formality,
 and short enough that canary users are not trapped. The owner may change it
 (§12).
@@ -323,9 +341,10 @@ payout owner is any 32-byte account id; rewards of a position go to
 what the link earns") in its transparent form: settlement pays positions,
 never neurons, and the payout account is the position's choice.
 
-Kinds 4 and 5 remain the pool's (chain.md §11.7). Kinds 8 (settlement
-ticket), 9 (fold step) and 10 (report) are reserved for the later rule sets
-of §7.3–§7.4; under rule set 1 they are invalid.
+Kinds 4 and 5 remain the pool's (chain.md §11.7). Kinds 8 and 9 do not
+exist: a ticket is a block, never a transaction (rewards.md §7), and a
+folded ticket under §7.3 is a header. Kind 10 (report) is reserved for the
+reports rule set of §7.4; under rule set 1 it is invalid.
 
 ### 3.6 fees
 
@@ -493,8 +512,17 @@ for v = −1:
 
 ```
 Δs(c) = s_E(c) − s_{E−1}(c)        // stake on c's side; a card absent at a boundary has s = 0 there
-a(c)  = Δs(c) · σ(c) · ḡ_pq                                  // signed, 256-bit integer (ḡ is 0 where the axon is absent at every node)
+a_exact(c) = Δs(c) · σ(c) · ḡ_pq                            // the path gradient: the cap and the floor (ḡ is 0 where the axon is absent at every node)
+a(c)       = k_c ≥ K_MIN ? (Σ of c's sampled marginals) / k_c, toward zero : a_exact(c)
+a⁺(c)      = max(0, a(c))
+â(c)       = floor(a⁺(c) · v(N) / Σ a⁺)   when Σ a⁺ > 0 and v(N) > 0; else nothing is paid and the pool carries
 ```
+
+A player's marginals are the entries of the window's tickets that cover it
+(rewards.md §7); `K_MIN = 64`; the rescale is the conservation clip of
+rewards.md §4 in nats under its sign conditions, every share floored, the
+dust `v(N) − Σ â` the pool's as in §5.5, so the shares never exceed what the
+epoch created; `x(c)` reads `â(c)` in §5.3.
 
 A card that changed side between the two boundaries (unlocked to zero and
 locked again with another valence) is a decrease on its old side and an
@@ -597,12 +625,19 @@ rule set 1 until now): `time[settle(E)] = hemera(D_EPOCH ‖ record)`, with
 record = epoch: u64 ‖ boundary: u64 ‖ beacon: [u8;32] ‖ boundary_root: [u8;32]
        ‖ particles: u32 ‖ axons: u32 ‖ phi: [u8;32] ‖ syntropy: i64 ‖ delta_syntropy: i64
        ‖ focus_bps: u16 ‖ budget: u64 ‖ paid: u64 ‖ pool_after: u64 ‖ rewarded: u32 ‖ payouts: [u8;32]
-                                                                                        // 198 bytes
+       ‖ players: u32 ‖ samples: u32 ‖ by_mean: u32 ‖ value: i64
+                                                                                        // 218 bytes
 phi     = hemera(D_PHI ‖ n: u32 ‖ φ*_E[0]: u64 ‖ … ‖ φ*_E[n−1]: u64)   // particles ascending, tru's raw fixed point
 payouts = Merkle root over leaves hemera(D_PAYOUT_LEAF ‖ card ‖ owner ‖ amount: u64),
           cards ascending, amount > 0 only, nodes hemera(D_PAYOUT_NODE ‖ L ‖ R),
           odd node promoted unchanged (chain.md §1.7); 32 zero bytes when none
 ```
+
+The lottery's four fields are the game's player count `N`, the window's
+sampled marginals Σ k_c, the players paid by their mean (`k_c ≥ K_MIN`,
+§5.2) and `v(N)` at 2^60 saturated to i64; `cluster(E) = hemera(D_CLUSTER ‖
+N: u32 LE ‖ (card[32] ‖ side: u8)…)`, side `0x01` for +1 and `0xff` for −1
+(rewards.md §7).
 
 `syntropy` and `delta_syntropy` are J(φ*_E) and J(φ*_E) − J(φ*_{E−1}) in
 tru's raw fixed point, signed; `focus_bps` is the split in force for the
@@ -656,12 +691,14 @@ Why the curve and why the cap:
 - per unit of active stake the yield `θ^½ · SUBSIDY / (θ · supply)` falls as
   θ grows: the first stakers are paid most, which is the bootstrap the
   economy needs;
-- the cap is the miner security floor: at most half the subsidy leaves
-  proof of work, so the cost of a rewrite never falls below half of what a
-  pure PoW chain of this subsidy buys. rewards.md derives the floor from
-  attack economics (`floor ≥ c_sec · TVL/M · r_atk`); none of those inputs
-  exists before launch, so the floor is a constant at genesis and its PID
-  loop (launch row 27) is a later rule set.
+- the cap is the miner security floor: at most half the subsidy leaves proof
+  of work, so the cost of a rewrite never falls below half of what a pure
+  PoW chain of this subsidy buys, and the ticket's subsidy is at least half
+  of `SUBSIDY` — above any gain a withheld sample could buy (rewards.md §7).
+  rewards.md derives the floor from attack economics (`floor ≥ c_sec · TVL/M
+  · r_atk`); the root chain carries none of those inputs, so the floor is
+  this constant and the PID loop of rewards.md §10 holds it there (a loop
+  with a zero input holds its setpoint).
 
 ### 6.2 coinbase and pool
 
@@ -702,25 +739,38 @@ the transaction, nothing is burned, no fee is routed to the pool. The fee
 role of rewards.md §8 (burn β, servicer γ, security budget) needs a fee
 market and paid inference, both cut from phase 1.
 
-## 7. mining, honestly
+## 7. mining
 
-### 7.1 at launch
+### 7.1 the work
 
-"Mining" on the root chain at genesis means two things and only two:
-
-- proof-of-work block production: hemera header grinding under ASERT
-  (chain.md §1), paid `SUBSIDY − cut + fees`. The work is synthetic, the
-  bootstrap puzzle of rewards.md §8 that hands out the initial stake;
-- settlement by recomputation: every full node computes every epoch's
-  solves (§5.1) and checks the settlement block bit for bit. Nobody is paid
-  for this computation; it is the cost of validating, as checking
-  signatures is. The miner of the settlement block chooses nothing in it.
-
-Settlement mining — the lottery in which each hash attempt is a Shapley
-sample and the winning ticket earns the subsidy (rewards.md §7) — is not
-active at genesis. What is active is its product: the fair division of
-Δφ⁺ among staked links, computed exactly (to the integrated-gradient
-approximation) instead of estimated by sampling.
+"Mining" on the root chain means one thing: settlement mining, the lottery
+of rewards.md §7, from block 1. The block at height h in epoch E + 1 samples
+the game of epoch E — the positions that changed between G_{E−1} and G_E,
+one cluster, `cluster(E) = hemera(D_CLUSTER ‖ N ‖ (card ‖ side)…)`, `v(S) =
+J_U(φ*(A^S)) − J_U(φ*(A^∅))` on the epoch engine of tru/specs/epoch.md. With
+`h = hemera(template)` over the header's first 168 bytes, `nonce =
+u64_le(h[0..8])` and `r = u64_le(h[8..16]) mod N`, the miner draws `π(n)` =
+tru `epoch::ordering(beacon, cluster, nonce, N)` and the probe pairs `(a_i,
+t_i)` from the hemera XOF of `D_PROBE ‖ beacon ‖ cluster ‖ nonce`, and
+computes `W_TICKET` entries: the marginals of the `min(N, W_TICKET − 1)`
+ranks from `r` cyclically — one cold solve per prefix; the whole ordering
+when the game is smaller than the window, whose marginals sum to `v(N)`
+exactly (tru#46) — and gradient probes `J_U(φ*(A_{E−1} + u_i·e_{a_i})) −
+J_U(φ*_{E−1})` against the game's base, `u_i = max(1, ⌊A_{a_i}·t_i/2^32⌋)`,
+for the remaining entries, one solve each; it writes `sample =
+hemera(D_SAMPLE ‖ W_TICKET ‖ m…)` (tru `Sample::preimage`, players
+ascending, then the probes) as the header's last field and holds the block
+iff `block_id < target`. Every ticket costs at most `W_TICKET + 1` solves
+whatever the epoch changed. The subsidy `SUBSIDY − cut + fees` pays the
+sample; every full node recomputes it, hash first, before relaying or
+accepting the block (pussy, `W_TICKET` 64: 2.2 s on one M4 Max core, 0.2 s
+across twelve, 8.2 s on one Xeon core — tru
+`audit/coalition-marginal-2026-11-04.md` §3; bostrom, `W_TICKET` 2: three
+solves with their builds, 22–25 s on one core, 7–9 s on twelve). The exact
+path gradient of §5.1 is computed by every node as before and is the cap and
+the floor of the payout (§5.2 amended); the miner of the settlement block
+chooses nothing in it. The samples and the exact value are served per epoch
+(`GET /epoch/{E}/lottery`, §11).
 
 ### 7.2 cost bound
 
@@ -751,35 +801,25 @@ axons and independent of how many changed. The threshold that matters is
 blocks, and a single solve already exceeds one 30-second interval at
 bostrom's size today.
 
-### 7.3 the ticket rule set (the scaling rule)
+### 7.3 the accumulator rule
 
-When the reference settlement exceeds `SETTLE_BUDGET`, or is projected to
-within 90 days at the observed growth, settlement moves to the lottery of
-rewards.md §7 by scheduled fork (chain.md §7.1, two weeks' notice). That
-rule set is specified here as far as the root chain fixes it:
-
-- the beacon is `beacon(E)` of §2.3; the cluster set is the canonical
-  partition of the epoch's changed positions into connected components of
-  overlapping ε-supports (launch row 35);
-- a ticket (kind 8) carries `(E, cluster, n, miner, m(n), proof)`; the
-  ordering is `π(n) = hemera(D_ORDER ‖ beacon(E) ‖ cluster ‖ n)`, the
-  win test `hemera(D_TICKET ‖ beacon(E) ‖ cluster ‖ n ‖ miner ‖ commit(m(n)))
-  < target(cluster)` with the target banded by cluster size (row 4); the
-  tags `D_ORDER` and `D_TICKET` are fixed by that rule set;
-- tickets are accepted in blocks `boundary(E) + 1 … settle(E) − 1`; the
-  settlement at `settle(E)` is the mean of accepted samples per cluster
-  under the same budget, gates, new-high rule, caps and rounding of §5;
-  clusters with fewer than `k_min` samples defer to the next epoch;
-- the PoW share of the subsidy is re-targeted from the header hash to the
-  ticket (rewards.md §8: "the subsidy and the settlement lottery are one
-  act"); the header keeps a hash target for ordering;
-- every ticket carries a sound per-ticket proof (foculus#61) and tickets
-  fold per cluster into one accumulator (launch rows 2, 5); full nodes stop
-  recomputing.
-
-Preconditions, each a launch-registry row: ticket proof cost below ticket
-reward (3), progress-freedom across clusters (4), canonical clusters (35),
-the hardware profile (36), an O(1) fold (5). None is required at genesis.
+A block admits `K_BLOCK` tickets beyond its own — each a winning sample of
+the same game under the same target, as a 200-byte header-shaped record in
+the body — folded with the block's own into the epoch's accumulator `(Σ m,
+k, π_acc)`, one decider per epoch, when both hold: (a) the epoch engine's
+step is a relation zheng proves (tru `audit/phi-relation-2026-11.md` §4), so
+a sample's solves leave the verifier; (b) the accumulation is constant-size
+with the verifier inside the step (foculus
+`audit/accumulated-settlement-2026-10.md` §4). `K_BLOCK = 0` while the
+condition is false; the rule set that sets it above zero carries the
+relation (proven-present §2.11) and is a scheduled fork (chain.md §7.1).
+Under it a block's subsidy divides equally among its tickets, emission stays
+a function of height, and a duplicate template counts once. The payout is
+the swarm's mean from genesis (§5.2 amended); the accumulator raises the
+samples per player beyond the `L·(W_TICKET − 1)/N` one epoch of blocks
+delivers, so games the window does not cover in one epoch (more than 236
+players at pussy, more than three at bostrom) move from the exact-gradient
+floor to the mean.
 
 ### 7.4 the reports rule set
 
@@ -830,7 +870,7 @@ exist; a lock on an existing link is a new high on an empty side).
 | link spam | zero-stake links | topology only: no weight, no focus, no reward; fee floor 257 units per link; ≤ 1,024 per block |
 | staked dust spam | many tiny positions to bloat state and settlement | a card per position costs the fee of a link; settlement cost is linear in axons, ≤ 245,760 new per epoch; dust earns at most 1 % of itself |
 | Sybil splitting | split stake across keys or cards | attribution, caps and the split curve are linear in stake; no per-identity rule exists to evade |
-| self-linking cycles | stake a ring p→q→p to concentrate focus (syntropy rises) | the pulse is paid once per new high (§5.3) and capped at 1 % of the added stake; teleport bounds the mass a ring holds; the ring's stake is locked seven days; residual: concentration is paid as knowledge — rewards.md §15's self-dealing frontier, bounded here by capital, not closed |
+| self-linking cycles | stake a ring p→q→p to concentrate focus (syntropy rises) | a ring on fresh particles with no link from the graph earns nothing within the measured range (its attribution is ≤ 0 up to 0.6 % of S0); a ring linked to the graph takes at most `min(⌊R/100⌋, ⌊F/4⌋)` once per new high — measured 0.056 % of its stake at most in the steady state, 0.197 % after ten quiet epochs, falling as 1/R — under a budget fed at the previous epoch's `focus_bps`, which its own stake cannot raise (rewards.md §7, §15; tru `audit/ring-extraction-2026-11-12.md`) |
 | stake recycling | unlock and relock to be paid again for the same edge | the new-high rule pays only above the decayed mark; a second key does not help (the mark is per axon side); yield of recycling ≤ the mark's decay, 50 % per 30 days of a stake that must sit locked 7 days per cycle |
 | honest restaker penalty (cost of the above) | restoring an edge abandoned within the month earns little | accepted; the mark decays with half-life 30 days |
 | last-block timing | lock in the last block of an epoch after seeing the epoch's links | all links of an epoch are one coalition at one path gradient (§5.1): a late copy on the same axon splits that axon's credit pro rata and lowers the gradient for both; a boundary miner can delay rivals' locks by one epoch (MEV, bounded by one epoch's ordering) |
@@ -838,8 +878,10 @@ exist; a lock on an existing link is a new high on an empty side).
 | capital censorship | `v = −1` stake to zero an edge | costs locked capital equal to the edge's weight, outbid by `v ≥ 0` stake; earns only if zeroing raised syntropy |
 | quiet-epoch capture | the only earner of an empty epoch | takes at most a quarter of the pool, and at most 1 % of its added stake |
 | reorg around the boundary | replace the boundary block to change the snapshot | possible below depth 120 at the price of the blocks; settlement waits until depth 120 (§2.5); every candidate boundary costs a block and forces at most one recompute |
-| boundary withholding (beacon grind) | discard a found boundary block | nothing reads the beacon at genesis; for the ticket rule set the bias costs a block reward per draw (§2.3) |
-| settlement DoS | make the recompute too slow to finish in D blocks | linear cost, 48× measured margin on one core at bostrom's size (§7.2), growth bounded by fees per axon; the ticket rule set is the scaling exit (§7.3) |
+| boundary withholding (beacon grind) | discard a found boundary block | every block of the next epoch reads the beacon; a redraw costs the boundary block's reward and buys a different sample set, which pays nothing (§2.3, rewards.md §7) |
+| settlement DoS | make the recompute too slow to finish in D blocks | linear cost, 48× measured margin on one core at bostrom's size (§7.2), growth bounded by fees per axon; a longer epoch is the scaling rule (§2.2, rewards.md §7) |
+| sample grinding | vary a header field without recomputing the sample | the seed is the whole 168-byte template (rewards.md §7): every variation is a new sample |
+| false sample | a header with id < target and a wrong `m` | invalid at validation step 8 (chain.md §5.5); producing it cost the attacker a real win, so relay before step 8 is not a free DoS |
 | nondeterminism | thread count, node order, rounding differ across nodes | canonical order (§4.3), fixed steps (§4.4), tru's integer arithmetic, φ* committed by digest under `state_root` (§5.6): any divergence halts the divergent node at `settle(E)` instead of forking value silently |
 | payout censorship | a miner omits a payout | payouts are a state transition of the height, not transactions |
 | rich-get-richer | idle capital compounding | only stake that adds new weight earns, once, and only active stake; passive stake and genesis weight earn nothing (rewards.md §9) |
@@ -891,7 +933,8 @@ a non-native token rejected; kind 2 with the opposite valence on a live card
 rejected; kind 6 at `since + MIN_LOCK − 1` rejected, at `since + MIN_LOCK`
 accepted, partial then full (card deleted); kind 6 by a non-author rejected;
 kind 7 re-points the owner; encodings of kinds 6 and 7 at 224 and 248
-bytes, trailing and missing bytes rejected, kinds 8–10 rejected.
+bytes, trailing and missing bytes rejected, kinds 8, 9 and 10 rejected
+(kind 10 reserved for §7.4; 8 and 9 are not kinds — a ticket is a block).
 
 Epochs (`blessed`, private test genesis, trivial target, `L` and `D`
 overridable only under `cfg(test)` like the PoW limit):
@@ -928,6 +971,7 @@ HTTP (chain-wire §7), new routes:
 | `GET /focus?top=N` | the N particles of highest focus |
 | `GET /card/{id}` | the card record and stake |
 | `GET /cards/{neuron}` | the author's cards (node-side index) |
+| `GET /epoch/{E}/lottery` | the window's samples of epoch E's game: per player, `k`, the mean and its standard error (i128 at 2^60), the exact path gradient, and `a(c)` as paid; from headers and the two snapshots |
 
 `/status` gains `epoch`, `next_boundary`, `last_settled`, `focus_bps`,
 `pool`, `active_stake`, `total_stake`, and the per-settlement checks of
@@ -958,10 +1002,10 @@ audit/epoch-settlement-2026-10.md §6).
 
 | owner | change |
 |---|---|
-| cybernode `rs/src/chain` | `params.rs` (§0); `tx.rs` kinds 6, 7 and kind 2 with stake; `apply.rs` coinbase split, settlement step, conservation; `state.rs` card, stake-key and pool operations journaled for reorgs; new `economy/` (`epoch.rs` boundaries and snapshots, `weights.rs` genesis weights and §4.2, `settle.rs` §5 over tru, `emission.rs` §6); `api.rs` §11; `wallet/tx.rs` builders for kinds 6, 7 |
+| cybernode `rs/src/chain` | `params.rs` (§0); `tx.rs` kinds 6, 7 and kind 2 with stake; `apply.rs` coinbase split, settlement step, conservation; `state.rs` card, stake-key and pool operations journaled for reorgs; new `economy/` (`epoch.rs` boundaries and snapshots, `weights.rs` genesis weights and §4.2, `settle.rs` §5 over tru, `emission.rs` §6); `api.rs` §11; `wallet/tx.rs` builders for kinds 6, 7; the 200-byte header with `sample`, `epoch::ordering` and the window, the recomputing verifier at validation step 8 (at most 65 solves, across cores), `K_BLOCK = 0` |
 | bbg | `CardRecord` + `author`, `valence`, `since`; `DIMENSION_VERSION` 4; genesis roots re-blessed |
-| tru | the epoch entry point `tru::focusing::epoch` (tru/specs/epoch.md): `phi` (canonical input §4.3, `PHI_STEPS`, cold start, 2⁻⁶⁰, J, the digest preimage), `path_gradient` (§5.1, `ATTR_NODES`, the ground of §4.4), `net_axons`, thread-count independent; tru/specs owns the operator transposes and the scale of the gradient (2^112 nats per weight unit) — tru#40 (1ea853e) and tru#41 (e660d1e, the ground and the path gradient) |
-| foculus | `phi.rs` and the VDF beacon retired from the root chain; specs/epoch.md superseded for the root chain by §2 here |
+| tru | the epoch entry point `tru::focusing::epoch` (tru/specs/epoch.md): `phi` (canonical input §4.3, `PHI_STEPS`, cold start, 2⁻⁶⁰, J, the digest preimage), `path_gradient` (§5.1, `ATTR_NODES`, the ground of §4.4), `net_axons`, thread-count independent; tru/specs owns the operator transposes and the scale of the gradient (2^112 nats per weight unit) — tru#40 (1ea853e) and tru#41 (e660d1e, the ground and the path gradient); the coalition value v(S) and the sample m(n) of rewards.md §7 on the same engine: `phi` over A^S with J over the union particle set |
+| foculus | `phi.rs` and the VDF beacon retired from the root chain; specs/epoch.md superseded for the root chain by §2 here; `settlement.rs`'s marginals re-based on tru's epoch engine; the win test of `tickets.rs` is the block id (rewards.md §7) |
 | conformance | §10 into chain-conformance §14 |
 | cyber/launch | rows 1–4, 24–32, 41 and the decision of 2026-10-17 |
 

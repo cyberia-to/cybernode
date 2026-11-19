@@ -64,12 +64,20 @@ pub fn w_ticket(chain: &str) -> usize {
 /// amended).
 pub const K_MIN: usize = 64;
 
-/// `V_BUDGET = ⌊0.5·T / t_verify⌋`: full sample verifications a node runs
-/// per block interval, all peers together (rewards.md §7 "Verification";
-/// chain.md §5.5 amended): pussy 6 (t_verify 2.2 s), bostrom 2 (7 s on
-/// twelve threads); `pussy-rc` takes pussy's. A dev or test net reads
-/// `SOFT3_DEV_V_BUDGET`, unbounded when unset: its blocks come faster than
-/// the interval the budget renews on.
+/// The *seed* of `V_BUDGET = ⌊0.5·T / t_verify⌋`, the full sample
+/// verifications a node runs per block interval (rewards.md §7
+/// "Verification"; chain.md §5.5 amended): pussy 6 (t_verify 2.2 s),
+/// bostrom 2 (7 s on twelve threads); `pussy-rc` takes pussy's. A dev or
+/// test net reads `SOFT3_DEV_V_BUDGET`, unbounded when unset: its blocks
+/// come faster than the interval the budget renews on.
+///
+/// It is a seed and not a ceiling: the engine converts this number into a
+/// starting `t_verify` and then moves that estimate to the node's own
+/// measured recomputation time with weight 1/8 per full verification
+/// (`Chain::effective_v_budget`). After roughly eight recomputations the
+/// budget in force is the measured one — a node slower than the nominal
+/// `t_verify` spends fewer slots than the number here, a faster one more,
+/// and an "unbounded" dev seed converges to the machine's real speed.
 pub fn v_budget(chain: &str) -> usize {
     match chain {
         "pussy" | "pussy-rc" => 6,
@@ -304,10 +312,10 @@ pub fn pow_limit() -> U256 {
 /// network simulator (cyberia-to/simulation) runs many in-process nodes on
 /// a private test genesis and needs the same trivial targets on every
 /// thread (settlement workers included), so the switch is process-wide.
-/// Without the feature the module does not exist and `POW_LIMIT` is 2^236;
-/// a node binary never enables it. The launch genesis files keep their
-/// 2^232 target either way; the simulator runs them in a process that
-/// never calls [`sim_pow::relax`].
+/// Without the feature the module does not exist and `POW_LIMIT` is 2^252;
+/// a node binary never enables it. The launch genesis files keep their own
+/// `GENESIS_BITS` either way — pussy 2^249, bostrom 2^252; the simulator
+/// runs them in a process that never calls [`sim_pow::relax`].
 #[cfg(feature = "sim")]
 pub mod sim_pow {
     use std::sync::atomic::{AtomicBool, Ordering};

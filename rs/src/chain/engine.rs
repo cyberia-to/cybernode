@@ -1230,6 +1230,15 @@ impl Chain {
     pub(super) fn after_tip_move(&mut self) -> Result<(), ChainError> {
         self.store.persist().map_err(ChainError::Store)?;
         self.economy.prune(self.store.tip_height());
+        // an arrival is worth keeping only while `evict_unverified` can
+        // still reach its header, and that walk stops at the tip's
+        // chainwork: once the tip passes an orphan header, or the store
+        // forgets it, the entry is dead weight. Dropping them here bounds
+        // `arrivals` by the unverified set above the tip instead of by the
+        // life of the process.
+        let tip_height = self.store.tip_height();
+        let store = &self.store;
+        self.arrivals.retain(|id, _| store.get(id).is_some_and(|e| e.header.height > tip_height));
         let new_final = self.store.tip_height().saturating_sub(FINALITY_DEPTH);
         while self.finalized < new_final {
             let h = self.finalized + 1;

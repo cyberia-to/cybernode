@@ -38,7 +38,7 @@ Topic ids are 32 bytes, `hemera("soft3/chain/topic/v1\0" ‖ chain ‖ name)`:
 
 | name | frame | payload | max size | who publishes |
 |---|---|---|---|---|
-| `headers` | `H` | one 168-byte header | 168 B | the miner of a new block; every node that validated it (steps 1–5) relays |
+| `headers` | `H` | one 200-byte header | 200 B | the miner of a new block; every node that validated it (steps 1–8, the sample included) relays |
 | `txs` | `T` | one transaction (§2 of chain.md) | 512 B | the submitter; every node that admitted it to its mempool relays |
 | `checkpoints` | `C` | `height: u64 ‖ block_id: [32] ‖ sig: NSIG1[102]` | 142 B | the checkpoint signer; relayed after signature check |
 | `shadow/<core>` | `X` | core-defined bytes | 4,096 B | shadow indexers (chain.md §7.3); never consensus |
@@ -48,12 +48,15 @@ Rules:
 - a node joins `headers`, `txs` and `checkpoints` of each chain it runs; the
   `shadow/*` topics are joined only with the `shadow` feature;
 - bodies are never gossiped: a header announces, the body is fetched (§3).
-  At 168 bytes a header fits any gossip message limit; a 256 KiB body does
+  At 200 bytes a header fits any gossip message limit; a 256 KiB body does
   not, and pushing bodies to peers that have not checked the PoW is the
   header-first rule broken;
-- gossip relay happens only after local validation: a header after PoW, a
-  transaction after mempool admission, a checkpoint after its signature;
-  an invalid message is dropped and scored (§5);
+- gossip relay happens only after local validation: a header after its id
+  test and its sample (chain.md §5.5 step 8 — the sample needs the parent
+  state and is checked under the node's `V_BUDGET` per interval, so a header
+  is relayed once its block is accepted), a transaction after mempool
+  admission, a checkpoint after its signature; an invalid message is dropped
+  and scored (§5);
 - the iroh-gossip `max_message_size` is set to 4,096 on every topic; larger
   frames are a protocol error.
 
@@ -70,7 +73,7 @@ One request per stream; a peer may keep up to 8 streams open per direction.
 | `h` | resp | `count: u16 ‖ header × count` | headers, ≤ 2,000 per response, in ascending height; `count = 0` means the locator has no common point except genesis mismatch (peer is on another genesis — disconnect) |
 | `r` | req | `from: u64 ‖ count: u16` | get-range: bodies of the responder's main chain from height `from`, `count ≤ 128` |
 | `b` | req | `count: u8 ‖ id: [32] × count` | get-blocks by id, `count ≤ 128` |
-| `B` | resp | `header[168] ‖ body` | one block per frame, in request order |
+| `B` | resp | `header[200] ‖ body` | one block per frame, in request order |
 | `t` | req | `count: u16 ‖ txid: [32] × count` | get-txs from the mempool, `count ≤ 256` |
 | `T` | resp | tx bytes | one per frame |
 | `k` | req | `from_height: u64` | get-checkpoints at or above a height |
@@ -147,10 +150,12 @@ Per-peer limits (token buckets, burst = 4× rate):
 | bytes received | 4 MiB/s |
 | request streams opened by the peer | 16 /s |
 | unsolicited block bodies | 0 — bodies arrive only in response to `r`/`b`; any other is a protocol error |
+| sample verifications | `V_BUDGET` full verifications per node per block interval, all peers together, by chainwork, ties by the node's local draw (chain.md §5.1, §5.5 step 8); no connection enlarges it; a header is relayed only after verification |
 
 Scoring: a peer starts at 0; +100 and disconnect for an invalid PoW header,
-a wrong-chain status, a body whose header we did not request, or a frame
-over size; +10 for an invalid signature, a non-canonical encoding, a header
+a header whose id passes the target and whose sample fails recomputation, a
+wrong-chain status, a body whose header we did not request, or a frame over
+size; +10 for an invalid signature, a non-canonical encoding, a header
 failing the time rule by more than 1 h; +1 for a duplicate; score decays by
 1 per minute; ≥ 100 bans the endpoint id
 for 1 h. Nothing is ever charged for a header that fails only the
@@ -269,16 +274,22 @@ GET /tx/{txid}
 
 GET /template?to={neuron}
   200 {"chain":"<name>","height":H,"prev":"<hex32: tip id>",
-       "header":"<hex168: candidate with nonce zero>","bits":"<hex8>",
+       "header":"<hex200: candidate with nonce zero and sample zero>",
+       "bits":"<hex8>",
        "target":"<hex32: the 32 LE bytes of decode(bits)>","body":"<hex>",
-       "expires":<unix second, 0 = none>}
+       "expires":<unix second, 0 = none>,
+       "game":{"epoch":E,"beacon":"<hex32>","cluster":"<hex32>",
+               "players":N,"axons":A,"w_ticket":W}}
       `chain::api::Template::json` renders exactly this; `target` repeats
-      `bits` decoded so an external worker needs no compact codec
+      `bits` decoded so an external worker needs no compact codec; a worker
+      computes the sample from the chain's state (chain-economy §7.1): the
+      template names the game, and a worker without the state has nothing
+      to grind
 
-POST /submit   {"header":"<hex168: the solved header>"}
+POST /submit   {"header":"<hex200: the solved header>"}
   200 {"id":"<hex32>","height":H}         accepted and relayed
   409 {"error":"stale template"}          prev is no longer the tip
-  422 {"error":"<reason>"}                pow, bits or syntax (chain.md §5.5 1–5)
+  422 {"error":"<reason>"}                pow, bits, syntax or sample (chain.md §5.5 1–5, 8)
   400 {"error":"<reason>"}                malformed request
 ```
 

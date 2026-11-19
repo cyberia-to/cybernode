@@ -27,7 +27,11 @@ pub struct Rules {
     pub clock: EpochClock,
     /// `W_TICKET`: the entries of a block's sample (rewards.md §7)
     pub w_ticket: usize,
-    /// `V_BUDGET`: full sample verifications per node per block interval
+    /// the seed of `V_BUDGET`, the full sample verifications per node per
+    /// block interval ([`params::v_budget`](super::params::v_budget)): the
+    /// engine turns it into a starting `t_verify` and then follows its own
+    /// measured recomputation time, so this governs only the node's first
+    /// verifications and is never a ceiling on the later ones
     pub v_budget: usize,
 }
 

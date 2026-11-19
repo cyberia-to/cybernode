@@ -11,15 +11,17 @@ alias: chain spec, root chain, phase-1 chain, cybernode chain, soft3 chain, puss
 # chain — the phase-1 root chain
 
 The root chain of phase 1 is a public proof-of-work chain on the soft3
-harness: hemera as the work function, bbg as the state, mudra NSIG1 as the
-signature, cyber-radio as the wire, tade as the framing. It carries exactly
-four things a neuron can do — mine, transfer, cyberlink with stake, and be
-paid for the focus its stake creates. The focus economy — epochs of a fixed
-number of blocks, φ* over the staked graph, settlement of Δφ⁺ to staked
-links by recomputation on every node, the subsidy split between miners and
-the focus pool — is consensus from genesis and is specified in
-[chain-economy](chain-economy.md). The pool (privacy, §11) is rule set 2;
-the ticket lottery and fold are the scaling rule set of chain-economy §7.3.
+harness: a settlement sample of tru/specs/rewards.md §7 under hemera as the
+work function, bbg as the state, mudra NSIG1 as the signature, cyber-radio
+as the wire, tade as the framing. It carries exactly four things a neuron
+can do — mine, transfer, cyberlink with stake, and be paid for the focus its
+stake creates. The focus economy — epochs of a fixed number of blocks, φ*
+over the staked graph, settlement of Δφ⁺ to staked links by recomputation on
+every node, the subsidy split between miners and the focus pool — is
+consensus from genesis and is specified in
+[chain-economy](chain-economy.md). The pool (privacy, §11) is rule set 2.
+The work of every block is a settlement sample (§1.2, chain-economy §7.1);
+the fold accumulator is the rule of chain-economy §7.3 under its condition.
 
 Owner decision 2026-10-15: "pure PoW, public chain, no features — mining,
 transfers, cyberlinks — on the whole soft3 harness; the four phase-1 cores
@@ -27,7 +29,11 @@ run in shadow mode as indexers and activate later by scheduled fork".
 Superseded in part by the owner's order of 2026-10-17 ("the goal is foculus,
 stakes with valence, and mining — not just relaunching a network on the new
 stack"): ordering stays proof of work, and the cores' economy ships in
-consensus at genesis, no shadow mode (chain-economy.md). Spec before code:
+consensus at genesis, no shadow mode (chain-economy.md). Superseded again by
+the owner's order of 2026-11-04 ("the proof of work must really sample
+values by the rewards distribution"): the work of every block is one Shapley
+sample of the epoch's game, from block 1 (chain-economy §7.1, rewards.md
+§7). Spec before code:
 implementation starts from this page, [chain-economy](chain-economy.md),
 [chain-wire](chain-wire.md) and [chain-conformance](chain-conformance.md).
 
@@ -61,13 +67,14 @@ coin, read from the genesis file (§4).
 
 | name | value | unit | where used |
 |---|---|---|---|
-| `HEADER_BYTES` | 168 | bytes | §1.1 |
+| `HEADER_BYTES` | 200 | bytes | §1.1 |
 | `BLOCK_TIME` (T) | 30 | s | §1.5 |
 | `HALF_LIFE` (H) | 600 | s | §1.5 |
 | `MTP_WINDOW` | 11 | headers | §1.4 |
 | `MAX_FUTURE_DRIFT` | 120 | s | §1.4 |
-| `POW_LIMIT` | 2^236 (bits `0x1e100000`) | target | §1.3 |
-| `GENESIS_BITS` | `0x1e010000` (target 2^232) | bits | §1.3, §4 |
+| `POW_LIMIT` | 2^252 (bits `0x20100000`) | target | §1.3 |
+| `GENESIS_BITS` | pussy `0x20020000` (target 2^249); bostrom `0x20100000` (the floor) | bits | §1.3, §4 |
+| `W_TICKET` | pussy 64, bostrom 2 | entries of a sample | chain-economy §7.1 |
 | `MAX_BLOCK_BYTES` | 262,144 | bytes, header + body | §1.6 |
 | `MAX_BLOCK_TXS` | 1,024 | transactions incl. coinbase | §1.6 |
 | `MAX_TX_BYTES` | 512 | bytes | §2 |
@@ -101,9 +108,10 @@ collapse recovers in about 66 minutes (§1.5).
 
 ### 1.1 header
 
-A header is exactly 168 bytes, little-endian throughout, no varints, no
-optional fields. 168 = 3 × 56: three full hemera rate blocks plus the
-mandatory padded block, four permutations per hash.
+A header is exactly 200 bytes, little-endian throughout, no varints, no
+optional fields. 200 = 3 × 56 + 32: three full hemera rate blocks and a
+fourth that carries the sample commitment and the padding (`0x01 ∥ 0x00*`,
+one absorption), four permutations per hash.
 
 | offset | size | field | type | meaning |
 |---|---|---|---|---|
@@ -116,11 +124,12 @@ mandatory padded block, four permutations per hash.
 | 72 | 32 | `tx_root` | [u8; 32] | §1.7; for genesis the genesis file particle (§4) |
 | 104 | 32 | `state_root` | [u8; 32] | bbg root after applying this block, §3.3 |
 | 136 | 32 | `chain` | [u8; 32] | chain id = genesis file particle, §4.4 |
+| 168 | 32 | `sample` | [u8; 32] | `hemera(D_SAMPLE ‖ W ‖ m…)`, the commitment of the block's settlement sample (chain-economy §7.1, tru `Sample::preimage`); the first 168 bytes are the template the sample is drawn from |
 
-The block id is the flat hemera sponge over the 168 header bytes:
+The block id is the flat hemera sponge over the 200 header bytes:
 
 ```
-block_id = hemera(header_bytes)          // 32 bytes, no domain prefix
+block_id = hemera(header_bytes)          // 32 bytes over 200, no domain prefix
 ```
 
 The chain id is a header field, so a header of one chain never validates on
@@ -135,26 +144,33 @@ target by timestamp.
 
 ```
 valid_pow(header) :=  u256_le(block_id) < target(bits)
+                 ∧  header.sample == hemera(D_SAMPLE ‖ m(header[0..168]))
 ```
 
-Both sides read as 256-bit little-endian integers; equality fails. Genesis
-(height 0) is exempt: its id is pinned by the genesis file, not mined.
+Both sides read as 256-bit little-endian integers; equality fails. `m` is
+the sample of chain-economy §7.1 on the game the parent state fixes, checked
+at validation step 8 (§5.5). Genesis (height 0) is exempt: its id is pinned
+by the genesis file, not mined, and it carries no sample.
 
-Expected hashes per block are `2^256 / (target + 1)`, the block's work (§5.1).
-Measured 2026-10-16 on an M4 Max, one core, `hemera::hash` over 168 bytes
-from a release build against hemera 0.4 (`release/0.4` `7237a23`, the
-phase1.toml pin), a linear nonce search through `Header::id` / `valid_pow`
-on a shared machine: 90,300 H/s — about 11 µs per header (hemera 0.3 on
-2026-10-15: 64,400 H/s, 15 µs; 0.4's single permutation is 2.2× faster,
-the sponge over 168 bytes 1.4×), far from the µs-per-permutation figure of
-steps-blocks-epochs §7, which is the permutation alone on the optimized
-path. Ten cores give order 0.9 MH/s per machine; three such machines
-together order 2–3 MH/s (the cybernode boxes are x86 and must be measured
-separately). The genesis target (2^232, 2^24 ≈ 16.8 M expected hashes) is
-sized so one such machine finds a block in about twenty seconds at that
-rate, and the DAA takes over from there. A
-honeycrisp or GPU hemera kernel will be one to three orders faster; the
-chain does not care, ASERT does (§1.5), and §8 says what it means.
+Expected attempts per block are `2^256 / (target + 1)`, the block's work
+(§5.1); an attempt is `W_TICKET + 1` cold solves of the epoch engine over
+the staked graph in every epoch (the marginals of a window of one ordering
+and at least one gradient probe, chain-economy §7.1). Measured on this
+engine at pussy's size with 64 players (tru#46, tru
+`audit/coalition-marginal-2026-11-04.md` §3): one marginal 35 ms on an M4
+Max core, 127 ms on a Xeon core; one sample 2.2 s and 8.2 s on one thread;
+5.06 samples a second on twelve workers of the M4 Max, 1.59 on thirty-two of
+the Xeon — about 150 samples per 30 s block for a laptop. Pussy's genesis
+target (2^249, 2^7 expected attempts) is sized so one such laptop finds a
+block in about 25 s; bostrom's is the floor (2^252: a sample is three solves
+with their builds, 7–9 s on twelve threads, 16 attempts about two minutes),
+and the DAA takes over from there. A GPU cannot shortcut a solve the way it
+shortcuts a hash — 48 dependent steps of random access over the graph; the
+receipt's two CPUs differ 3.7× per marginal with the same arithmetic — so
+its advantage is bounded by its random-access throughput, an order of 1–10
+against hemera grinding's 10²–10³; no GPU row is measured yet (cyber/launch
+row 36). A worker without the staked graph has nothing to grind: the miner
+is a full node.
 
 ### 1.3 compact target
 
@@ -178,12 +194,14 @@ bits = (size << 24) | mant
 ```
 
 A header is invalid unless `bits == encode(decode(bits))` and
-`decode(bits) <= POW_LIMIT` and `decode(bits) >= 1`. Examples:
-`0x1e010000` ↔ 2^232 (canonical, `GENESIS_BITS`); `0x1d100000` ↔ 2^228
-(canonical); `0x1e001000` decodes to 2^228 too and is rejected;
-`0x1d800000` is rejected (sign). `POW_LIMIT` = 2^236 is the floor: at the
-measured 90 kH/s one laptop core mines a floor block in about 12 s, so the
-chain never stalls below one laptop core. Vectors in chain-conformance §2.
+`decode(bits) <= POW_LIMIT` and `decode(bits) >= 1`. Examples: `0x20020000`
+↔ 2^249 (canonical, pussy's `GENESIS_BITS`); `0x20100000` ↔ 2^252
+(canonical, `POW_LIMIT`, bostrom's `GENESIS_BITS`); `0x1d100000` ↔ 2^228
+(canonical); `0x1e001000` decodes to 2^228 too and is rejected; `0x1d800000`
+is rejected (sign). `POW_LIMIT` = 2^252 is the floor: 16 expected attempts,
+about 35 s on one laptop core at pussy's size (2.2 s per sample, tru#46
+§3.1) and about five minutes at bostrom's (three solves of 6 s), so neither
+chain stalls below one laptop core. Vectors in chain-conformance §2.
 
 ### 1.4 timestamps
 
@@ -221,7 +239,9 @@ floating-point `pow` anywhere in this path is a consensus bug. The parent's
 `time`, not the candidate's, enters the formula; this is what gives siblings
 one target.
 
-Behavior:
+Behavior; "hash rate" below is the network's attempt rate — samples per
+second — since an attempt is a sample (§1.2); a larger graph lowers it
+exactly as slower hardware does, and ASERT holds the interval either way:
 
 - hash rate ×k, held: the interval shortens to T/k immediately and the
   chain runs ahead of its ideal clock; the target halves for every H = 600 s
@@ -255,7 +275,7 @@ body = count: u32 LE ‖ tx[0] ‖ tx[1] ‖ … ‖ tx[count−1]
 
 - `tx[0]` is the coinbase (§2.2) and no other tx is;
 - `count ≤ MAX_BLOCK_TXS`;
-- `168 + len(body) ≤ MAX_BLOCK_BYTES`;
+- `200 + len(body) ≤ MAX_BLOCK_BYTES`;
 - each `tx` is self-delimiting (fixed size per kind, §2) and
   `len(tx) ≤ MAX_TX_BYTES`;
 - the same txid never appears twice in a block.
@@ -306,7 +326,8 @@ tx = version: u8 (= 1) ‖ kind: u8 ‖ body ‖ sig
 Kinds 6 and 7 are the economy's (chain-economy §3.4–§3.5). Any other
 `version` or `kind` is invalid under rule set 1; kinds 4 (deposit) and 5
 (spend) are the pool's, formats frozen at genesis, valid only from rule set
-2 (§11.7); kinds 8–10 are reserved (chain-economy §3.5). Fixed sizes: a
+2 (§11.7); kind 10 is reserved and kinds 8 and 9 do not exist
+(chain-economy §3.5: a ticket is a block, never a transaction). Fixed sizes: a
 decoder knows the length from the second byte; trailing or missing bytes are
 a decode error.
 
@@ -332,7 +353,12 @@ height: u64 ‖ to: neuron[32] ‖ amount: u64 ‖ extra: [u8; 32]
   (chain-economy §6.1–§6.2, credited to the pool in the same step); less is
   invalid too (no burning by omission — supply must be a pure function of
   height, §3.5);
-- `extra` is free: pool extranonce, a commitment, zeros;
+- the coinbase is the ticket's claim: `to` is the identity the win test keys
+  through `tx_root` (rewards.md §7), and `amount` is the subsidy of the
+  sample the header carries;
+- `extra` is free: pool extranonce, a commitment, zeros; a change of `extra`
+  is a change of the template, so it draws a new sample (chain-economy
+  §7.1);
 - the output is credited to `balances[H(to ‖ τ_native)]` and is spendable
   only from height `height + COINBASE_MATURITY`, so a reorg never invalidates
   spends of a subsidy that was itself reorged out.
@@ -520,15 +546,14 @@ Fees move, subsidy mints, nothing burns; supply is a function of height
 alone. Conservation is checked by the `tok` crate's conservation helpers
 (plumb), which own the arithmetic; the chain supplies the deltas.
 
-### 3.5 subsidy — the stakeless onramp, bootstrap phase
+### 3.5 subsidy — the stakeless onramp
 
-The subsidy is the envelope of rewards.md §8 ("the subsidy envelope precedes
-the lottery it will carry"): a per-block amount paid for a proof meeting a
-difficulty target, karma-blind and stake-blind, the permissionless door. In
-phase 1 the proof is a hemera header hash — synthetic work, tolerable
-"exactly once: at bootstrap the subsidy's product is distribution, not
-attribution". The settlement ticket of §7–§8 replaces the hash as the proof
-by scheduled fork (§7); the envelope does not change.
+The subsidy pays the block's settlement sample (rewards.md §8): a per-block
+amount paid for a Shapley sample meeting the target, karma-blind and
+stake-blind, the permissionless door — what it asks of a newcomer is the
+public staked graph and a machine that solves it. The work is the sample
+from block 1; no synthetic puzzle precedes it (UniversalHash belongs to the
+viewing economy, outside the chain, rewards.md §8).
 
 ```
 SUBSIDY = floor(S0 / 105,120,000)        // = S0 · 1 % / BLOCKS_PER_YEAR
@@ -549,7 +574,7 @@ with this default.
 
 ### 3.6 retention
 
-- headers: permanent on every node (168 B × 1,051,200 per year = 177 MB/yr);
+- headers: permanent on every node (200 B × 1,051,200 per year = 210 MB/yr);
 - bodies: phase-1 nodes are archival — every body is kept, because genesis
   replay and the shadow indexers read the whole stream; worst case
   256 KiB × 2,880 blocks/day = 720 MB/day, typical a few MB/day; a pruning
@@ -749,9 +774,13 @@ censor, cannot rewrite — only veto deep reorgs) and bounded in time.
 
 ### 5.4 orphans and ordering
 
-Headers whose `prev` is unknown go to a bounded pool (`ORPHAN_POOL`: 1,024
-headers, evicted after 600 s or by PoW-weight when full) and trigger a
-`get-headers` from the sender (chain-wire §3). Bodies are requested only for
+Headers whose `prev` is unknown, and headers waiting for a
+sample-verification slot, go to a bounded pool (`ORPHAN_POOL`: 1,024
+headers, evicted after 600 s or, when full, by the node's local draw —
+body-less headers older than one block interval first — never by claimed
+work, since a claimed PoW weight costs a forger only target-passing headers;
+rewards.md §7) and trigger a `get-headers` from the sender (chain-wire §3).
+Bodies are requested only for
 headers that are on a chain with more work than the local tip or within
 `FINALITY_DEPTH` of it. Every rejected block id is remembered (bounded set)
 so it is never re-validated.
@@ -760,21 +789,35 @@ so it is never re-validated.
 
 Cheap before expensive, and nothing stateful before PoW:
 
-1. syntax: 168 bytes; `version & 0xffff == 1`; `chain` matches; `bits`
+1. syntax: 200 bytes; `version & 0xffff == 1`; `chain` matches; `bits`
    canonical and within limits;
 2. parent: `prev` known and valid, `height == prev.height + 1`;
 3. time: MTP rule, future-drift rule;
 4. target: `bits == expected bits from ASERT(prev)`;
-5. proof of work: `block_id < target`; the header is now accepted and
-   relayed;
+5. the id test: `block_id < target`; nothing is relayed yet;
 6. body: size and count budgets, `tx_root` recomputed and equal, coinbase
    position and height;
 7. transactions in order: decode, signature (`verify_statement`), nonce,
    balances, kind rules; coinbase amount equals subsidy plus fees;
-8. state: apply on a copy of the parent state, `state_root` equal; commit.
+8. state: apply on a copy of the parent state; the sample: the window's
+   entries recomputed on the parent state's game (chain-economy §7.1; the
+   solves run across cores) and committed under `D_SAMPLE` equal
+   `header.sample`; `state_root` equal; commit; the header is now relayed.
 
 A block failing 6–8 marks the header invalid (and every descendant);
-failures at 1–5 never reach disk.
+failures at 1–5 never reach disk. Step 8 runs the full recomputation under a
+node-wide budget `V_BUDGET = ⌊0.5·T / t_verify⌋` per block interval (pussy
+6, bostrom 2), served by the header's chainwork (§5.1), ties in an order
+drawn from the node's local randomness (not consensus); headers beyond the
+budget wait in the orphan pool (§5.4); a header is relayed only after it is
+verified. Bound: `F` forged target-passing headers at the tip delay the
+node's acceptance of a new block by `F / V_BUDGET` intervals in expectation
+(the honest header is served with probability `V_BUDGET / (V_BUDGET + F)`
+per interval), at `F · 2^256/target` hashes per node per interval; per node,
+never propagating, never safety. A header whose sample failed is dropped
+from the orphan pool, scored, never re-queued; a header is verified at most
+once per node; the asymmetry ends when a sound per-ticket proof or the
+accumulator makes verification cheaper than forgery (rewards.md §7).
 
 ## 6. network
 
@@ -812,21 +855,18 @@ readiness for a rule set; they are informational, never consensus.
 
 Since 2026-10-17 rule set 1 carries the focus economy (chain-economy.md):
 epochs, φ*, staked links with valence, settlement by recomputation, the
-subsidy split. Rule set 2 is the pool (§11). The ticket lottery and fold
-(chain-economy §7.3) and the reports rule set (chain-economy §7.4) follow
-by scheduled fork. The list below is what the chain leaves room for:
+subsidy split. Rule set 2 is the pool (§11). The reports rule set
+(chain-economy §7.4) and the accumulator (chain-economy §7.3, `K_BLOCK` > 0)
+follow by scheduled fork. The list below is what the chain leaves room for:
 
 - the pool (§11): kinds 4 and 5, the turnstile, the commitment tree and the
   block proof, with every format frozen at genesis — rule set 2 brings only
   its verifying keys;
-- further tx kinds ≥ 8 (settlement ticket 8, fold step 9, report 10;
-  kinds 6 unlock and 7 payout are rule set 1) — kinds are a u8;
+- further tx kinds ≥ 10 (report 10; kinds 6 unlock and 7 payout are rule set
+  1; 8 and 9 are not kinds — a ticket is a block) — kinds are a u8;
 - the coinbase `extra` field as the commitment slot for the fold
   accumulator when it becomes consensus (the epoch beacon is the boundary
   block id, chain-economy §2.3);
-- the subsidy envelope re-targeted from the header hash to the settlement
-  ticket (rewards.md §8), with the same `SUBSIDY` unless the activation
-  table says otherwise;
 - bbg dimensions today left empty (signals, A, N) start to be written;
   the root construction is unchanged, so rule-set-1 roots remain verifiable.
 
@@ -834,7 +874,7 @@ by scheduled fork. The list below is what the chain leaves room for:
 
 Since 2026-10-17 foculus's epoch clock and settlement are consensus
 (chain-economy.md) and are no longer indexers; what remains in shadow mode
-is privacy (until rule set 2) and the ticket/fold path (until its rule set).
+is privacy (until rule set 2) and the fold accumulator (until `K_BLOCK` > 0).
 They run on every full node as indexers: processes (or threads) that read
 the block stream after validation and publish derived results nobody is
 obliged to believe. The chain gives them exactly one
@@ -850,8 +890,7 @@ What each reads and publishes:
 
 | indexer | reads | publishes (shadow topic / HTTP) |
 |---|---|---|
-| settlement tickets | the graph, the beacon `block_id(boundary(E))` | sampled tickets and their Shapley estimate compared against the consensus settlement (chain-economy §7.3); `/shadow/settlement` |
-| fold | shadow tickets | cluster accumulators and decider outputs; `/shadow/fold` |
+| fold | the chain's samples | epoch accumulators and decider outputs against the served estimate; `/shadow/fold` |
 | privacy | the tx stream | P1–P3 leakage reports on the public wire, stealth-address trial balances; `/shadow/privacy` |
 
 Shadow topics are gossip topics named `shadow/<core>` (chain-wire §2), not
@@ -948,7 +987,7 @@ them.
 cybernode/rs/src/chain/
   mod.rs          Chain: open(home, name) → tip, state, mempool; Event bus
   params.rs       §0 constants, ACTIVATIONS, embedded chain ids and genesis ids
-  header.rs       Header encode/decode (168 B), block_id, bits codec (§1.1–1.3)
+  header.rs       Header encode/decode (200 B), block_id, bits codec (§1.1–1.3)
   pow.rs          valid_pow, work, chainwork (u256 helpers, no floats)
   daa.rs          ASERT (§1.5), MTP
   tx.rs           kinds 0–3: encode/decode, txid, statement, verify (mudra)
