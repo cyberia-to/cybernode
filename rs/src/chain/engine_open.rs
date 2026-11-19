@@ -19,6 +19,7 @@ use super::params::{BLOCK_TIME, CHAINS, EpochClock, FINALITY_DEPTH, REVERTS, v_b
 use super::revert::{self, RevertEntry, RevertTable, Reverted};
 use super::revert_statement::{self, RevertStatement, StatementError, StatementSet};
 use super::select::Checkpoints;
+use super::state::StateBackend;
 use super::store::{self, Store};
 use super::u256::U256;
 

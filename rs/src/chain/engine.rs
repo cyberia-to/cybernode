@@ -28,7 +28,7 @@ use super::params::COINBASE_MATURITY;
 use super::revert::{RevertTable, Reverted};
 use super::revert_statement::StatementSet;
 use super::select::Checkpoints;
-use super::state::Id;
+use super::state::{Id, StateBackend};
 use super::store::{self, Store};
 use super::tx::Body;
 use super::u256::U256;
