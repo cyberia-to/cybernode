@@ -141,25 +141,44 @@ one closest to tru#46); none is resolved silently.
    the sign of the change, so an epoch the adjoint calls "earns" the game
    calls `v(N) ≤ 0` and pays nothing (chain-economy §5.2 amended: nothing is
    paid when `v(N) ≤ 0`, §16 "an epoch without positively attributed active
-   stake pays nothing"). This is the behaviour of the two ignored tests
+   stake pays nothing"). That was the behaviour of the two economy tests
    (`multi_epoch_settlement_end_to_end`,
-   `attribution_is_linear_in_stake_and_valence_cancels`). The spec author's
-   §15 resolution (P14b) is to fix the exact-gradient source to one engine;
-   when it lands the two tests are redrawn to a net-positive-syntropy epoch
-   and un-ignored. The payout code follows reading A today; the mean path
-   (`k_c ≥ K_MIN`) is unaffected and is what the launch chains run.
+   `attribution_is_linear_in_stake_and_valence_cancels`), which were
+   `#[ignore]`d while it held.
 
-## remaining (2026-11-12)
+   Settled in the round-1 disposition below (R18-6): the exact-gradient
+   source is the consensus epoch engine — tru#46's `Game` base, the one the
+   node settles with — so the mean, the exact value and `v(N)` are one
+   engine, and §15 (P14b) changes nothing here. The claim this paragraph
+   first carried, that the mean path (`k_c ≥ K_MIN`) is what the launch
+   chains run, was wrong and is struck: bostrom (`W_TICKET` 2) reaches `k_c
+   ≥ 64` only for `N ≤ 3`, and pussy epochs with `N > 236` pay by the exact
+   gradient, so the exact gradient is a launch payout. The two tests named
+   above are redrawn to a net-positive-syntropy epoch and running; neither
+   is `#[ignore]`d.
 
-- the two economy tests above are `#[ignore]`d pending §15 (P14b); the §7
-  payout path compiles and the mean/rescale/clip/floor/dust arithmetic is in
-  `economy/settle.rs`.
-- `pussy-rc` two-node dev chain to ≥ 240 blocks with equal epoch records, and
-  the receipt `audit/chain/ticket-pow-2026-11.md` (block times, tickets/s,
-  verification time, `V_BUDGET` under a forged-header flood): not run.
+## remaining (2026-11-19)
+
+Closed since this list was first written: the two economy tests are redrawn
+and running — the only `#[ignore]` in the tree is the pre-existing
+`settlement_cost_on_genesis_files` (`rs/src/chain/economy/tests.rs:350`);
+the `pussy-rc` two-node dev chain and the receipt
+`audit/chain/ticket-pow-2026-11.md` are run, `status: measured`, 342 passed,
+0 failed, 1 ignored at that head, with the restart on ticket proof of work
+in `audit/chain/alpha-tickets-2026-11-12.md`;
+`long_forged_chains_cost_one_branch_attempt_each` is written
+(`rs/src/chain/tests/flood.rs:146`).
+
+Still open:
+
+- the 24 h of the alpha: `pussy-rc` has restarted on ticket proof of work on
+  edge-b and agent-a, and the day of block times, tickets/s and equal epoch
+  records it owes is not yet recorded in the alpha receipt.
 - the forged-header flood tool (an `examples/` binary that submits
-  target-passing headers with random samples to measure `V_BUDGET`): not
-  written.
+  target-passing headers with random samples to a running node, to measure
+  `V_BUDGET` against a live peer instead of in process): not written. The
+  rule itself is covered by the in-process flood tests
+  (`rs/src/chain/tests/flood.rs`).
 
 ## P15b · review round 1 disposition (2026-11-12)
 
@@ -272,7 +291,44 @@ writing into §7 (with its addenda): no catch-up exemption at all.
   a 2·D+50 chain with the budget at 1: one branch attempt, every later block
   free); the flood test (2×cap forgeries: `V + 1` recomputations, the store
   at the cap, the honest branch served within `⌈(cap + 1)/V⌉` windows by the
-  draw). The F-long-forged-chains test could not be produced in this
-  session: its construction was stopped twice by the assistant's safety
-  classifier; the walker's subtree invalidation is exercised by the single-
-  height flood and the rule is stated in the code doc.
+  draw); and `long_forged_chains_cost_one_branch_attempt_each`
+  (`rs/src/chain/tests/flood.rs:146`): F long forged chains above the tip
+  cost one branch attempt each, the walker's subtree invalidation killing
+  each chain at its root. An earlier revision of this page recorded that
+  test as unproducible in its session; it was written and is in the tree.
+
+## P15b · review round 3 disposition (2026-11-19)
+
+- R1 (evidence) — fixed: the pull request's body is rewritten against this
+  head (the test counts of the receipt, no `#[ignore]`d payout tests, the
+  receipt and the dev chain run, the specs amended here), and what is open
+  is the 24 h of the alpha and the flood tool.
+- R2 (correctness) — fixed: question 9, the "remaining" list and the third
+  cut are brought to this head above; the superseded claim about the mean
+  path is struck where it stood instead of left under a later correction.
+- R3 (quality) — fixed: `engine.rs` (1,285), `ticket.rs`, `corpus.rs`,
+  `params.rs`, `apply.rs` and `economy/settle.rs` are split by moving whole
+  items into `engine_open.rs`, `engine_check.rs`, `engine_verify.rs`,
+  `engine_select.rs`, `ticket/wire.rs`, `corpus/invalid.rs`,
+  `params/chains.rs`, `apply/errors.rs` and `economy/settle/record.rs`. No
+  file this change raises is over cyberia/quality.md's 500 lines; the public
+  paths are unchanged (re-exports), and no line of the moved code differs
+  from the line it came from except six visibilities a cross-module call
+  needs.
+- R4 (house) — fixed: `specs/chain.md`, `chain-economy.md`, `chain-wire.md`
+  and `chain-conformance.md` are amended in this pull request from the
+  clause list of tru `audit/rewards-amendments-2026-11-04.md` (§1, §2, §2b,
+  §2c): the 200-byte header with `sample` at 168, `POW_LIMIT` 2^252 and
+  per-chain `GENESIS_BITS`, `W_TICKET`/`K_MIN`/`K_BLOCK` and the four new
+  domain tags, validation step 8 under `V_BUDGET`,
+  `settle(E) = boundary(E + 1) + D`, the 218-byte record, the payout by the
+  swarm's mean, `GET /epoch/{E}/lottery`, the 200-byte template, and the §1
+  and §5 conformance vectors re-blessed from this tree.
+- R5, R6 (quality) — fixed: the `sim_pow` doc comment carried this change's
+  own superseded numbers; `v_budget(chain)` and `Rules.v_budget` now say
+  they are the seed of the budget, which `effective_v_budget` then follows
+  by the measured EMA.
+- R7 (quality) — fixed: `arrivals` kept an entry for the life of the process
+  once the tip passed an orphan header; `after_tip_move` drops every entry
+  at or below the tip height, or whose header the store forgot.
+
