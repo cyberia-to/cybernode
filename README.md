@@ -13,7 +13,7 @@ decided and executed from [[soft3/projects/cybernode|the cybernode project]] (th
 | here | holds |
 |---|---|
 | `rs/` | the crate and binary `cybernode`: `chain/` the kernel, `genesis/`, `node/`, `wallet/`, `network.rs`; the verbs `run` (`node`) · `mine` · `sync` (`status`) · `genesis` · `chain` · `conformance` · `network` |
-| `specs/` | [[cybernode/specs/chain|chain]] · [[cybernode/specs/chain-wire|chain-wire]] · [[cybernode/specs/chain-conformance|chain-conformance]] · [[cybernode/specs/chain-economy|chain-economy]] · [[cybernode/specs/genesis|genesis]] · [[cybernode/specs/native-node|native-node]] · [[cybernode/specs/routing|routing]] |
+| `specs/` | [[cybernode/specs/chain|chain]] · [[cybernode/specs/chain-wire|chain-wire]] · [[cybernode/specs/chain-conformance|chain-conformance]] · [[cybernode/specs/chain-economy|chain-economy]] · [[cybernode/specs/genesis|genesis]] · [[cybernode/specs/network|network]] · [[cybernode/specs/native-node|native-node]] · [[cybernode/specs/routing|routing]] |
 | `deploy/` | `cybernode@<network>.service`, `cybernode-check`, journald, logrotate, nginx and ufw templates of an instance |
 | `audit/` | the receipts: conformance, economy, mining, the net, the requirement map of the chain |
 
