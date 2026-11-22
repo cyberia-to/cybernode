@@ -164,7 +164,7 @@ The node knows no network by name: ports, peers, parameters and the genesis all 
 |---|---|---|---|
 | pussy | PUSSY | `PUSSY` | the burial of the space-pussy chain, halted at 19,940,993 |
 | bostrom | BOOT | `BOOT` | the burial of the bostrom chain, halted at 25,120,712 |
-| cyber | CYB | `cyber`, which is also the graph of the protocol and the package `true-cyber` | the proven states of the two above: CYB is minted by claims |
+| cyber | CYB | `cyb.money`, named after the site: GitHub reads `CYB` and `cyb` as one name | the proven states of the two above: CYB is minted by claims |
 
 ## 9. where the node stands
 
@@ -180,7 +180,7 @@ The node does not read a repository yet. This table is the distance, and it is c
 | `--repository <repo>` | `--chain pussy\|bostrom` with `--snapshot DIR` and `--genesis FILE`. `--network NAME` and `-n` exist already and mean another thing: they select a named network for the client commands and are stripped from the arguments before dispatch (`rs/src/cli.rs`), so the standard takes a flag of its own |
 | `network check` | no command |
 
-The files exist beside the node: for pussy and bostrom on the default branches of [PUSSY](https://github.com/cyberia-to/PUSSY) and [BOOT](https://github.com/cyberia-to/BOOT) (`network.toml`, `genesis/`), for cyber in the pull request cyberia-to/cyber#163. They are filled with the node's own values and say in their headers that the node does not read them yet.
+The files exist beside the node: for pussy and bostrom on the default branches of [PUSSY](https://github.com/cyberia-to/PUSSY) and [BOOT](https://github.com/cyberia-to/BOOT) (`network.toml`, `genesis/`), for cyber on the default branch of [cyb.money](https://github.com/cyberia-to/cyb.money). They are filled with the node's own values and say in their headers that the node does not read them yet.
 
 ## 10. open
 
