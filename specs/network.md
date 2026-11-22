@@ -44,7 +44,7 @@ Every key is required unless marked. Integers are whole; a time is in seconds, a
 
 | table | key | type | meaning |
 |---|---|---|---|
-| `network` | `name` | string | the network's name, lower case; it names the node's `--network` |
+| `network` | `name` | string | the network's name, lower case; it enters the genesis file |
 | | `hrp` | string | the prefix of a legacy address |
 | | `denom` | string | the native coin |
 | | `genesis_time` | integer | the time of block 0, unix seconds |
@@ -68,7 +68,9 @@ Every key is required unless marked. Integers are whole; a time is in seconds, a
 | `rewards` | the reward parameters of the rule set | integers | [chain-economy](chain-economy.md) §0; the keys follow the rule set |
 | `ports` | `api`, `radio` | string, `host:port` | defaults of a node of this network; local, they enter no digest |
 
-Everything but `ports` is consensus: two nodes that differ in one value are on two networks. The identity keys and `genesis_time` enter the genesis file and so the chain id; the rest binds through the rule set the chain id commits to.
+Everything but `ports` is consensus: two nodes that differ in one value are on two networks. Eight keys enter the genesis file itself, in its params frame ([chain](chain.md) §4.1), and so the chain id directly: `name`, `hrp`, `denom`, `genesis_time`, `work.genesis_bits`, `emission.subsidy`, `finality.checkpoint_key`, `finality.checkpoint_sunset`; the frame carries the pool record beside them. The rest binds through the rule set the chain id commits to.
+
+The pool record is the tenth field of that frame and no key of `network.toml`: its 74 bytes — depth 40, digest width 64, anchor window 1,000 ([chain](chain.md) §0, §11.10) — are frozen by the node for every network, so a network cannot choose them. `network check` prints the record and refuses a genesis that carries another.
 
 A network may declare only values its rule set admits. The bounds are the rule set's: a block time the work cannot keep, a finality depth of zero, a subsidy that is not the function of the genesis supply are refused by `network check`.
 
@@ -144,9 +146,9 @@ The genesis is a function of the repository: the sources are pinned and the rule
 To raise a network:
 
 1. `cybernode network check <repo>` — every file parses, every key is known, every value is inside the rule set's bounds, every rule is in the vocabulary, the manifest's digest is the pinned one.
-2. `cybernode genesis build --network <repo>` — the sources fetched and verified, the rules applied, the genesis file written with its report.
+2. `cybernode genesis build --repository <repo>` — the sources fetched and verified, the rules applied, the genesis file written with its report.
 3. the particle, the block-0 id and the state root are compared with the lock. A first build writes the lock with its receipt; a later build that differs stops.
-4. `cybernode run --network <repo>` — block 0 is that file, and the node runs by `network.toml`.
+4. `cybernode run --repository <repo>` — block 0 is that file, and the node runs by `network.toml`.
 
 To join a network:
 
@@ -171,13 +173,14 @@ The node does not read a repository yet. This table is the distance, and it is c
 | the standard | the node today |
 |---|---|
 | `network.toml` | constants of `rs/src/chain/params.rs`, one set for every network |
-| `[ports]`, `endpoints.toml` | a `match` on the network's name in `rs/src/cli.rs` |
+| `[ports]`, `[node]` of `endpoints.toml` | a `match` on the network's name in `rs/src/cli.rs` |
+| `[peers]` of `endpoints.toml` | three places: the file `peers.toml` version 1 read by `rs/src/chain/net/discovery.rs`, given by `--peers FILE` and by the unit `deploy/chain/cybernode@.service` with `deploy/chain/peers.toml.example`; and a bootstrap set compiled into the binary, which an operator extends and cannot replace ([chain-wire](chain-wire.md) §5) |
 | the rules of `genesis/` | code of `rs/src/genesis/`, described in [genesis](genesis.md) § derivation |
 | `genesis.lock` | soft3 `conformance/chain-genesis.toml`; the binary carries zero ids and `--genesis` is mandatory |
-| `--network <repo>` | `--chain pussy\|bostrom` with `--snapshot DIR` and `--genesis FILE` |
+| `--repository <repo>` | `--chain pussy\|bostrom` with `--snapshot DIR` and `--genesis FILE`. `--network NAME` and `-n` exist already and mean another thing: they select a named network for the client commands and are stripped from the arguments before dispatch (`rs/src/cli.rs`), so the standard takes a flag of its own |
 | `network check` | no command |
 
-The repositories of pussy and bostrom carry the files today, filled with the node's own values, and say in their headers that the node does not read them yet.
+The files exist beside the node: for pussy on the default branch of [space-pussy](https://github.com/cyberia-to/space-pussy) ([network.toml](https://github.com/cyberia-to/space-pussy/blob/main/network.toml), [genesis/](https://github.com/cyberia-to/space-pussy/tree/main/genesis)), for bostrom and cyber in the pull requests cyberia-to/bostrom#35 and cyberia-to/true-cyber#6. They are filled with the node's own values and say in their headers that the node does not read them yet.
 
 ## 10. open
 
