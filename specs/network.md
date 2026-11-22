@@ -56,7 +56,7 @@ Every key is required unless marked. Integers are whole; a time is in seconds, a
 | | `mtp_window` | integer | blocks of the median time past |
 | | `max_future_drift` | integer | seconds a block's time may lead |
 | | `genesis_bits`, `pow_limit_bits` | string, hex | the first target and the easiest |
-| `blocks` | `header_bytes`, `max_block_bytes`, `max_block_signals`, `max_signal_bytes` | integer | the sizes |
+| `blocks` | `max_block_bytes`, `max_block_signals`, `max_signal_bytes` | integer | the sizes |
 | | `min_fee_per_byte` | integer | the fee floor |
 | | `nonce_window`, `orphan_pool_headers`, `orphan_pool_seconds` | integer | admission |
 | `finality` | `coinbase_maturity`, `finality_depth`, `max_reorg` | integer | `max_reorg = finality_depth − 1` |
@@ -68,9 +68,17 @@ Every key is required unless marked. Integers are whole; a time is in seconds, a
 | `rewards` | the reward parameters of the rule set | integers | [chain-economy](chain-economy.md) §0; the keys follow the rule set |
 | `ports` | `api`, `radio` | string, `host:port` | defaults of a node of this network; local, they enter no digest |
 
-Everything but `ports` is consensus: two nodes that differ in one value are on two networks. Eight keys enter the genesis file itself, in its params frame ([chain](chain.md) §4.1), and so the chain id directly: `name`, `hrp`, `token`, `genesis_time`, `work.genesis_bits`, `emission.subsidy`, `finality.checkpoint_key`, `finality.checkpoint_sunset`; the frame carries the pool record beside them. The rest binds through the rule set the chain id commits to.
+Everything but `ports` is consensus: two nodes that differ in one value are on two networks. They do not all bind in the same way.
+
+- Eight keys enter the genesis file itself, in its params frame ([chain](chain.md) §4.1), and so the chain id directly: `name`, `hrp`, `token`, `genesis_time`, `work.genesis_bits`, `emission.subsidy`, `finality.checkpoint_key`, `finality.checkpoint_sunset`. A node that reads the genesis reads these values, and a file that carries others has another particle.
+- The pool record and the header's size are keys of no table: the node freezes them for every network, below.
+- The rest — `authorization`, `work` beside the bits, the sizes, the fee floor, the admission window, `finality` beside `checkpoint_key` and `checkpoint_sunset`, `emission` beside the subsidy, `epoch`, `focus`, `rewards` — binds through `rules.rule_set` alone, as the declaration of the values that rule set is to hold. The genesis file carries no rule set, and the activation table is "compiled into the release" ([chain](chain.md) §7.1), so the chain id commits to none of them: today they are the constants of `rs/src/chain/params.rs` that every release carries (§9), and two nodes of the same chain id and different releases can hold different values and each believe itself right. The lock of §5 does not close this either — it digests the genesis file, not `network.toml`.
+
+So for this third group `network.toml` is the statement of record and the node is the authority, until the gap of §10 is closed.
 
 The pool record is the tenth field of that frame and no key of `network.toml`: its 74 bytes — depth 40, digest width 64, anchor window 1,000 ([chain](chain.md) §0, §11.10) — are frozen by the node for every network, so a network cannot choose them. `network check` prints the record and refuses a genesis that carries another.
+
+The header's size is frozen the same way and is no key either: a header is exactly 168 bytes in the fixed layout of [chain](chain.md) §1.1, which the codec cannot vary, so a network declaring another value would be refused and one declaring 168 would state nothing.
 
 A network may declare only values its rule set admits. The bounds are the rule set's: a block time the work cannot keep, a finality depth of zero, a subsidy that is not the function of the genesis supply are refused by `network check`.
 
@@ -162,9 +170,11 @@ The node knows no network by name: ports, peers, parameters and the genesis all 
 
 | network | coin | repository | sources |
 |---|---|---|---|
-| pussy | PUSSY | `PUSSY` | the burial of the space-pussy chain, halted at 19,940,993 |
-| bostrom | BOOT | `BOOT` | the burial of the bostrom chain, halted at 25,120,712 |
-| cyber | CYB | `cyb.money`, named after the site: GitHub reads `CYB` and `cyb` as one name | the proven states of the two above: CYB is minted by claims |
+| pussy | PUSSY | `.PUSSY`, was `space-pussy` | the burial of the space-pussy chain, halted at 19,940,993 |
+| bostrom | BOOT | `.BOOT`, was `bostrom` | the burial of the bostrom chain, halted at 25,120,712 |
+| cyber | CYB | `.CYB`; its site is cyb.money | the proven states of the two above: CYB is minted by claims |
+
+Each is named after its token with a leading dot for the sigil: the product is $CYB, and `CYB` without the dot is a name GitHub does not tell from the browser `cyb`.
 
 ## 9. where the node stands
 
@@ -174,16 +184,17 @@ The node does not read a repository yet. This table is the distance, and it is c
 |---|---|
 | `network.toml` | constants of `rs/src/chain/params.rs`, one set for every network |
 | `[ports]`, `[node]` of `endpoints.toml` | a `match` on the network's name in `rs/src/cli.rs` |
-| `[peers]` of `endpoints.toml` | three places: the file `peers.toml` version 1 read by `rs/src/chain/net/discovery.rs`, given by `--peers FILE` and by the unit `deploy/chain/cybernode@.service` with `deploy/chain/peers.toml.example`; and a bootstrap set compiled into the binary, which an operator extends and cannot replace ([chain-wire](chain-wire.md) §5) |
+| `[peers]` of `endpoints.toml` | three places: the file `peers.toml` version 1 read by `rs/src/chain/net/discovery.rs`, given by `--peers FILE` and by the unit `deploy/chain/cybernode@.service` with `deploy/chain/peers.toml.example`. A bootstrap set compiled into the binary, which an operator extends and cannot replace, is specified by [chain-wire](chain-wire.md) §5 and is not implemented: `rs/src/node/chain_node.rs` builds the bootstrap list from `--peers` alone and takes an empty one without it |
 | the rules of `genesis/` | code of `rs/src/genesis/`, described in [genesis](genesis.md) § derivation |
 | `genesis.lock` | soft3 `conformance/chain-genesis.toml`; the binary carries zero ids and `--genesis` is mandatory |
 | `--repository <repo>` | `--chain pussy\|bostrom` with `--snapshot DIR` and `--genesis FILE`. `--network NAME` and `-n` exist already and mean another thing: they select a named network for the client commands and are stripped from the arguments before dispatch (`rs/src/cli.rs`), so the standard takes a flag of its own |
 | `network check` | no command |
 
-The files exist beside the node: for pussy and bostrom on the default branches of [PUSSY](https://github.com/cyberia-to/PUSSY) and [BOOT](https://github.com/cyberia-to/BOOT) (`network.toml`, `genesis/`), for cyber on the default branch of [cyb.money](https://github.com/cyberia-to/cyb.money). They are filled with the node's own values and say in their headers that the node does not read them yet.
+The files exist beside the node: for pussy and bostrom on the default branches of [.PUSSY](https://github.com/cyberia-to/.PUSSY) and [.BOOT](https://github.com/cyberia-to/.BOOT) (`network.toml`, `genesis/`), for cyber on the default branch of [.CYB](https://github.com/cyberia-to/.CYB). They are filled with the node's own values and say in their headers that the node does not read them yet.
 
 ## 10. open
 
+- what binds the third group of §2. The chain id commits to eight keys and to no rule set, so nothing a network can show binds the values its rule set is to hold. Closing it is a change of [chain](chain.md): the params frame would carry `rules.rule_set`, or the lock of §5 would digest `network.toml` beside the genesis file. Neither is decided, and until one is, a node of another release is caught by the activation table of [chain](chain.md) §7.1 and by its own constants, not by the repository.
 - the network key: who signs `endpoints.toml` and the lock.
 - the bounds of a rule set: which values a network may set within it, and which only a new rule set changes.
 - the reward keys: they follow soft3 `projects/complete-rewards.md` and change with it.
