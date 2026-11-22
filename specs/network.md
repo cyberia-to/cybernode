@@ -105,11 +105,12 @@ A build fetches every file by its pin and verifies it by sha256 and size, cached
 | | `balances` | `carry` | which denoms of the burial become tokens |
 | | | `delegated`, `unbonding` | staked and unbonding coins return to their accounts |
 | | | `liquidity_positions` | a position is dissolved into its pool's reserves at the halt |
+| | | `reserve_account` | how the reserve account of a pool is found |
 | | | `pool_coins` | dropped |
 | | | `exclude` | a denom that does not fit the amount's width is excluded whole and reported |
 | | | `check` | the sum of every carried denom equals the burial's supply |
 | | `supply` | `genesis_supply`, `subsidy` | what the native supply is, and the subsidy as its function |
-| | `claims` | `from`, `rate` | a network built from other networks' states mints by claims against them |
+| | `claims` | `from`, `rate`, `once` | a network built from other networks' states mints by claims against them |
 | graph | `particles` | `readdress` | how an old content address becomes a particle |
 | | | `naming_links` | whether a link names the old address |
 | | `links` | `order`, `passports`, `restored`, `duplicates`, `stake` | which links block 0 carries, in which order, with what stake |
@@ -161,7 +162,7 @@ The node knows no network by name: ports, peers, parameters and the genesis all 
 |---|---|---|---|
 | pussy | PUSSY | `space-pussy` | the burial of the space-pussy chain, halted at 19,940,993 |
 | bostrom | BOOT | `bostrom` | the burial of the bostrom chain, halted at 25,120,712 |
-| cyber | CYB | to be named by the owner | the proven states of the two above: CYB is minted by claims |
+| cyber | CYB | `true-cyber` | the proven states of the two above: CYB is minted by claims |
 
 ## 9. where the node stands
 
