@@ -46,7 +46,7 @@ Every key is required unless marked. Integers are whole; a time is in seconds, a
 |---|---|---|---|
 | `network` | `name` | string | the network's name, lower case; it enters the genesis file |
 | | `hrp` | string | the prefix of a legacy address |
-| | `denom` | string | the native coin |
+| | `token` | string | the native token; the params frame of [chain](chain.md) §4.1 calls this field `denom`, a name inherited from the old chains |
 | | `genesis_time` | integer | the time of block 0, unix seconds |
 | `rules` | `rule_set` | integer | the rule set of block 0 |
 | | `activations` | list of `[rule set, height]` | which rule set from which height ([chain](chain.md) §7.1) |
@@ -68,7 +68,7 @@ Every key is required unless marked. Integers are whole; a time is in seconds, a
 | `rewards` | the reward parameters of the rule set | integers | [chain-economy](chain-economy.md) §0; the keys follow the rule set |
 | `ports` | `api`, `radio` | string, `host:port` | defaults of a node of this network; local, they enter no digest |
 
-Everything but `ports` is consensus: two nodes that differ in one value are on two networks. Eight keys enter the genesis file itself, in its params frame ([chain](chain.md) §4.1), and so the chain id directly: `name`, `hrp`, `denom`, `genesis_time`, `work.genesis_bits`, `emission.subsidy`, `finality.checkpoint_key`, `finality.checkpoint_sunset`; the frame carries the pool record beside them. The rest binds through the rule set the chain id commits to.
+Everything but `ports` is consensus: two nodes that differ in one value are on two networks. Eight keys enter the genesis file itself, in its params frame ([chain](chain.md) §4.1), and so the chain id directly: `name`, `hrp`, `token`, `genesis_time`, `work.genesis_bits`, `emission.subsidy`, `finality.checkpoint_key`, `finality.checkpoint_sunset`; the frame carries the pool record beside them. The rest binds through the rule set the chain id commits to.
 
 The pool record is the tenth field of that frame and no key of `network.toml`: its 74 bytes — depth 40, digest width 64, anchor window 1,000 ([chain](chain.md) §0, §11.10) — are frozen by the node for every network, so a network cannot choose them. `network check` prints the record and refuses a genesis that carries another.
 
@@ -104,13 +104,13 @@ A build fetches every file by its pin and verifies it by sha256 and size, cached
 |---|---|---|---|
 | distribution | `owners` | `with_secp256k1_key` | a key known to the burial becomes `neuron_of(pubkey)`, re-derived and refused on mismatch |
 | | | `without_key` | an account that never signed becomes `legacy_owner(hrp, account)` |
-| | `balances` | `carry` | which denoms of the burial become tokens |
+| | `balances` | `carry` | which tokens of the burial are carried |
 | | | `delegated`, `unbonding` | staked and unbonding coins return to their accounts |
 | | | `liquidity_positions` | a position is dissolved into its pool's reserves at the halt |
 | | | `reserve_account` | how the reserve account of a pool is found |
 | | | `pool_coins` | dropped |
-| | | `exclude` | a denom that does not fit the amount's width is excluded whole and reported |
-| | | `check` | the sum of every carried denom equals the burial's supply |
+| | | `exclude` | a token that does not fit the amount's width is excluded whole and reported |
+| | | `check` | the sum of every carried token equals the burial's supply |
 | | `supply` | `genesis_supply`, `subsidy` | what the native supply is, and the subsidy as its function |
 | | `claims` | `from`, `rate`, `once` | a network built from other networks' states mints by claims against them |
 | graph | `particles` | `readdress` | how an old content address becomes a particle |
@@ -162,9 +162,9 @@ The node knows no network by name: ports, peers, parameters and the genesis all 
 
 | network | coin | repository | sources |
 |---|---|---|---|
-| pussy | PUSSY | `space-pussy` | the burial of the space-pussy chain, halted at 19,940,993 |
-| bostrom | BOOT | `bostrom` | the burial of the bostrom chain, halted at 25,120,712 |
-| cyber | CYB | `true-cyber` | the proven states of the two above: CYB is minted by claims |
+| pussy | PUSSY | `PUSSY` | the burial of the space-pussy chain, halted at 19,940,993 |
+| bostrom | BOOT | `BOOT` | the burial of the bostrom chain, halted at 25,120,712 |
+| cyber | CYB | `cyber`, which is also the graph of the protocol and the package `true-cyber` | the proven states of the two above: CYB is minted by claims |
 
 ## 9. where the node stands
 
@@ -180,7 +180,7 @@ The node does not read a repository yet. This table is the distance, and it is c
 | `--repository <repo>` | `--chain pussy\|bostrom` with `--snapshot DIR` and `--genesis FILE`. `--network NAME` and `-n` exist already and mean another thing: they select a named network for the client commands and are stripped from the arguments before dispatch (`rs/src/cli.rs`), so the standard takes a flag of its own |
 | `network check` | no command |
 
-The files exist beside the node: for pussy on the default branch of [space-pussy](https://github.com/cyberia-to/space-pussy) ([network.toml](https://github.com/cyberia-to/space-pussy/blob/main/network.toml), [genesis/](https://github.com/cyberia-to/space-pussy/tree/main/genesis)), for bostrom and cyber in the pull requests cyberia-to/bostrom#35 and cyberia-to/true-cyber#6. They are filled with the node's own values and say in their headers that the node does not read them yet.
+The files exist beside the node: for pussy and bostrom on the default branches of [PUSSY](https://github.com/cyberia-to/PUSSY) and [BOOT](https://github.com/cyberia-to/BOOT) (`network.toml`, `genesis/`), for cyber in the pull request cyberia-to/cyber#163. They are filled with the node's own values and say in their headers that the node does not read them yet.
 
 ## 10. open
 
